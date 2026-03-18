@@ -12,3 +12,4 @@ class GPT2Config:
     dropout: float = 0.0
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     flash: bool = False  # use flash attention
+    device: str = "cuda"  # device to run on
