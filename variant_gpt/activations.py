@@ -1,7 +1,9 @@
 import logging
+import math
 from collections import OrderedDict
 
-from torch import nn
+import torch
+from torch import nn, Tensor
 
 logger = logging.get_logger(__name__)
 
@@ -13,8 +15,19 @@ class ClassInstantier(OrderedDict):
         return cls(**kwargs)
 
 
+class NewGELUActivation(nn.Module):
+    """
+    Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT). Also see
+    the Gaussian Error Linear Units paper: https://huggingface.co/papers/1606.08415
+    """
+
+    def forward(self, input: Tensor) -> Tensor:
+        return 0.5 * input * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (input + 0.044715 * torch.pow(input, 3.0))))
+
+
 ACT2CLS = {
     "gelu": nn.GELU,
+    "gelu_new": NewGELUActivation,
     "leaky_relu": nn.LeakyReLU,
     "relu": nn.ReLU,
     "relu6": nn.ReLU6,
