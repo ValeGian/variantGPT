@@ -5,7 +5,7 @@ from collections import OrderedDict
 import torch
 from torch import nn, Tensor
 
-logger = logging.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class ClassInstantier(OrderedDict):
