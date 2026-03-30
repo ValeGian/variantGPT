@@ -8,7 +8,8 @@ class GPT2Config:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
-    activation_function = "gelu_new"
+    activation_function: str = "gelu_new"
+    layer_norm_epsilon: float = 1e-5
     dropout: float = 0.0
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     flash: bool = False  # use flash attention
