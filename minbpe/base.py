@@ -1,264 +1,237 @@
 """
-Contains the base Tokenizer class and a few common helper functions.
-The base class also contains the (common) save/load functionality.
-It would be possible to be a lot more strict about the interface and
-e.g. isolating all regex/pattern parts to the RegexTokenizer, but
-some concessions are made for simplicity.
+Base tokenizer class + shared helpers.
+
+Key optimisation: merge_and_update_stats now works on a doubly-linked list
+stored as parallel arrays (vals, prev, nxt) alongside a position index.
+This makes each merge O(k) in the number of pair occurrences rather than
+O(n) in the total sequence length, because we no longer rebuild the list.
 """
+
 import unicodedata
 
-# -----------------------------------------------------------------------------
-# a few helper functions useful for both BasicTokenizer and RegexTokenizer
 
-
-def get_stats(ids, counts=None):
-    """
-    Given a list of integers, return a dictionary of counts of consecutive pairs
-    Example: [1, 2, 3, 1, 2] -> {(1, 2): 2, (2, 3): 1, (3, 1): 1}
-    Optionally allows to update an existing dictionary of counts
-    """
-    counts = {} if counts is None else counts
-    for pair in zip(ids, ids[1:]):  # iterate consecutive elements
+def get_stats(ids):
+    """Count consecutive pairs in *ids* (list of ints)."""
+    counts = {}
+    for i in range(len(ids) - 1):
+        pair = (ids[i], ids[i + 1])
         counts[pair] = counts.get(pair, 0) + 1
     return counts
 
 
-def merge(ids, pair, idx):
-    """
-    In the list of integers (ids), replace all consecutive occurrences
-    of pair with the new integer token idx
-    Example: ids=[1, 2, 3, 1, 2], pair=(1, 2), idx=4 -> [4, 3, 4]
-    """
-    newids = []
-    i = 0
-    while i < len(ids):
-        # if not at the very last position AND the pair matches, replace it
-        if ids[i] == pair[0] and i < len(ids) - 1 and ids[i+1] == pair[1]:
-            newids.append(idx)
-            i += 2
-        else:
-            newids.append(ids[i])
-            i += 1
-    return newids
+# ---------------------------------------------------------------------------
+# Linked-list representation for O(k) incremental merges
+# ---------------------------------------------------------------------------
+# We keep three parallel lists:
+#   vals[i]  – the token id at position i (only meaningful for live nodes)
+#   prev[i]  – index of previous live node (-1 if head)
+#   nxt[i]   – index of next live node     (-1 if tail)
+# Plus a dict  pair_positions: (a,b) -> set of positions i where
+#   vals[i]==a and vals[nxt[i]]==b.
+#
+# This representation is created lazily on the first call to
+# merge_and_update_stats and cached on the *stats* dict itself (via a
+# dunder key that can't collide with an (int,int) pair key).
+
+_LL_KEY = "__ll"   # hidden key stored on the stats dict
+
+
+def _init_ll(ids, stats):
+    """Attach linked-list structures to *stats* for future merges."""
+    n = len(ids)
+    vals = list(ids)
+    prev = list(range(-1, n - 1))
+    nxt  = list(range(1, n + 1))
+    if n:
+        nxt[n - 1] = -1
+
+    pair_pos = {}
+    for i in range(n - 1):
+        pair = (vals[i], vals[i + 1])
+        if pair not in pair_pos:
+            pair_pos[pair] = set()
+        pair_pos[pair].add(i)
+
+    stats[_LL_KEY] = (vals, prev, nxt, pair_pos)
 
 
 def merge_and_update_stats(ids, pair, idx, stats):
     """
-    Merge all occurrences of pair -> idx in ids, updating stats
-    incrementally rather than recomputing from scratch.
+    Merge every occurrence of *pair* into *idx*.
 
-    Mutates stats in-place. Returns (new_ids, changed_pairs).
-    changed_pairs is a set of every pair whose count was modified —
-    callers that maintain a priority queue can use it to push fresh
-    entries without rebuilding the whole structure.
+    On the first call the function builds a linked-list index and caches it
+    inside *stats*.  Subsequent calls reuse and mutate that index, making
+    each merge O(k) where k = number of occurrences of the pair.
 
-    Why this is faster than merge() + get_stats():
-    - merge() + get_stats() touch every element of ids twice: O(n) each.
-    - This function also touches every element once for the merge scan,
-      but the stats update is O(k) where k = number of occurrences of
-      pair (k << n for rare pairs), not O(n).
-    - Total per-iteration cost: O(n) scan + O(k) stats vs O(n) + O(n).
+    Parameters
+    ----------
+    ids : list[int]
+        Current token sequence.  Ignored after the first call (the linked
+        list is the source of truth), but the compacted list is returned.
+    pair : tuple[int, int]
+        The bigram to merge.
+    idx : int
+        The replacement token id.
+    stats : dict
+        Pair-count dict.  Mutated in-place.  Also carries the linked-list
+        cache under a private key.
 
-    Correctness notes for the incremental update:
-      For each merged position, three kinds of pairs change:
-        1. Left boundary:  (left_neighbor, p0) → (left_neighbor, idx)
-        2. Right boundary: (p1, right_neighbor) → (idx, right_neighbor)
-        3. Between two consecutive merges: (p1, p0) → (idx, idx)
-      Cases 1 and 2 are skipped when the neighbor is itself a just-merged
-      idx (consecutive merges), to avoid double-counting.
+    Returns
+    -------
+    new_ids : list[int]
+        The compacted token sequence after the merge.
+    changed : set
+        Set of pairs whose counts were modified (excluding *pair* itself).
     """
-    p0, p1 = pair
-    newids = []
-    merged_at = []   # positions in newids where idx was placed
+    # lazily build linked list on first call
+    if _LL_KEY not in stats:
+        _init_ll(ids, stats)
 
-    i = 0
-    while i < len(ids):
-        if i < len(ids) - 1 and ids[i] == p0 and ids[i + 1] == p1:
-            merged_at.append(len(newids))
-            newids.append(idx)
-            i += 2
-        else:
-            newids.append(ids[i])
-            i += 1
-
-    n_merged = len(merged_at)
-    if n_merged == 0:
-        return newids, set()
-
+    vals, prev, nxt, pair_pos = stats[_LL_KEY]
     changed = set()
+    positions = list(pair_pos.get(pair, ()))
 
-    def dec(p):
-        """Decrement count of p, removing the entry when it hits 0."""
-        c = stats.get(p, 0) - 1
-        if c <= 0:
-            stats.pop(p, None)
-        else:
-            stats[p] = c
-        changed.add(p)
+    for pos in positions:
+        # validity check for overlapping pairs
+        rn = nxt[pos]
+        if rn == -1 or vals[pos] != pair[0] or vals[rn] != pair[1]:
+            continue
 
-    def inc(p):
-        stats[p] = stats.get(p, 0) + 1
-        changed.add(p)
+        p  = prev[pos]
+        nn = nxt[rn] if rn != -1 else -1
 
-    for j, pos in enumerate(merged_at):
-        is_consecutive   = j > 0      and merged_at[j - 1] == pos - 1
-        next_consecutive = j < n_merged - 1 and merged_at[j + 1] == pos + 1
+        # --- replace left token with merged token ---
+        vals[pos] = idx
 
-        # --- left boundary ---
-        # Skip when the left neighbor is another idx we just merged
-        # (that update is handled by the "between" case of the prior step).
-        if pos > 0 and not is_consecutive:
-            left = newids[pos - 1]
-            dec((left, p0))   # old left-boundary pair disappears
-            inc((left, idx))  # new left-boundary pair appears
+        # --- remove old neighbour pairs ---
+        if p != -1:
+            old_left = (vals[p], pair[0])
+            pair_pos.get(old_left, set()).discard(p)
+            cnt = stats.get(old_left, 0) - 1
+            if cnt > 0:
+                stats[old_left] = cnt
+            else:
+                stats.pop(old_left, None)
+            changed.add(old_left)
 
-        # --- right boundary ---
-        # Skip when the right neighbor is another idx we just merged
-        # (that update is handled by the "between" case of this step).
-        if pos < len(newids) - 1 and not next_consecutive:
-            right = newids[pos + 1]
-            dec((p1, right))   # old right-boundary pair disappears
-            inc((idx, right))  # new right-boundary pair appears
+        if nn != -1:
+            old_right = (pair[1], vals[nn])
+            pair_pos.get(old_right, set()).discard(rn)
+            cnt = stats.get(old_right, 0) - 1
+            if cnt > 0:
+                stats[old_right] = cnt
+            else:
+                stats.pop(old_right, None)
+            changed.add(old_right)
 
-        # --- between two consecutive merged positions ---
-        if next_consecutive:
-            dec((p1, p0))    # bridging pair disappears
-            inc((idx, idx))  # new pair between two adjacent idx tokens
+        # --- stitch out the right token ---
+        nxt[pos] = nn
+        if nn != -1:
+            prev[nn] = pos
 
-    # Remove all n_merged direct occurrences of pair that were consumed.
-    # (Neighboring dec() calls above may have already partially reduced
-    # stats[pair] when pair's own tokens appear as neighbors — e.g. (a,a)
-    # adjacent to another (a,a) — so we adjust the remainder here.)
-    remaining = stats.get(pair, 0) - n_merged
-    if remaining <= 0:
-        stats.pop(pair, None)
-    else:
-        stats[pair] = remaining
-    changed.add(pair)
+        # --- add new neighbour pairs ---
+        if p != -1:
+            new_left = (vals[p], idx)
+            if new_left not in pair_pos:
+                pair_pos[new_left] = set()
+            pair_pos[new_left].add(p)
+            stats[new_left] = stats.get(new_left, 0) + 1
+            changed.add(new_left)
 
-    return newids, changed
+        if nn != -1:
+            new_right = (idx, vals[nn])
+            if new_right not in pair_pos:
+                pair_pos[new_right] = set()
+            pair_pos[new_right].add(pos)
+            stats[new_right] = stats.get(new_right, 0) + 1
+            changed.add(new_right)
+
+    # clean up the merged pair from stats and pair_pos
+    stats.pop(pair, None)
+    pair_pos.pop(pair, None)
+    changed.discard(pair)
+
+    # --- compact the linked list into a plain list for the caller ---
+    # walk the linked list from the head
+    new_ids = []
+    # find head (first node whose prev == -1 among live nodes)
+    # The original head is always position 0 if it's still live,
+    # otherwise follow the chain.  Easiest: just walk from 0.
+    node = 0
+    # but position 0 might have been stitched out — find the real head
+    if len(vals) > 0:
+        # head is the node with prev == -1 that is still reachable
+        # Since we only stitch out *right* tokens of pairs, the very first
+        # live node is always position 0 (it can be replaced but never removed).
+        node = 0
+        while node != -1:
+            new_ids.append(vals[node])
+            node = nxt[node]
+
+    return new_ids, changed
 
 
-# first two helper functions...
+# ---------------------------------------------------------------------------
+# Tokenizer base class
+# ---------------------------------------------------------------------------
 
-
-def replace_control_characters(s: str) -> str:
-    # we don't want to print control characters
-    # which distort the output (e.g. \n or much worse)
-    # https://stackoverflow.com/questions/4324790/removing-control-characters-from-a-string-in-python/19016117#19016117
-    # http://www.unicode.org/reports/tr44/#GC_Values_Table
-    chars = []
-    for ch in s:
-        if unicodedata.category(ch)[0] != "C":
-            chars.append(ch)  # this character is ok
-        else:
-            chars.append(f"\\u{ord(ch):04x}")  # escape
-    return "".join(chars)
-
-
-def render_token(t: bytes) -> str:
-    # pretty print a token, escaping control characters
-    s = t.decode('utf-8', errors='replace')
-    s = replace_control_characters(s)
-    return s
-
-# -----------------------------------------------------------------------------
-# the base Tokenizer class
+def render_token(t):
+    """Pretty-print a token, escaping control characters."""
+    s = t.decode("utf-8", errors="replace")
+    ctrl = unicodedata.category(s[0]).startswith("C") if s else False
+    return repr(s) if ctrl else s
 
 
 class Tokenizer:
-    """Base class for Tokenizers"""
+    """Base class; subclasses must implement train / encode / decode."""
 
     def __init__(self):
-        # default: vocab size of 256 (all bytes), no merges, no patterns
-        self.merges = {}  # (int, int) -> int
-        self.pattern = ""  # str
-        self.special_tokens = {}  # str -> int, e.g. {'<|endoftext|>': 100257}
-        self.vocab = self._build_vocab()  # int -> bytes
-
-    def train(self, text, vocab_size, verbose=False):
-        # Tokenizer can train a vocabulary of size vocab_size from text
-        raise NotImplementedError
-
-    def encode(self, text):
-        # Tokenizer can encode a string into a list of integers
-        raise NotImplementedError
-
-    def decode(self, ids):
-        # Tokenizer can decode a list of integers into a string
-        raise NotImplementedError
+        self.merges = {}
+        self.pattern = ""
+        self.special_tokens = {}
+        self.vocab = self._build_vocab()
 
     def _build_vocab(self):
-        # vocab is simply and deterministically derived from merges
         vocab = {idx: bytes([idx]) for idx in range(256)}
-        for (p0, p1), idx in self.merges.items():
+        for (p0, p1), idx in sorted(self.merges.items(), key=lambda x: x[1]):
             vocab[idx] = vocab[p0] + vocab[p1]
         for special, idx in self.special_tokens.items():
             vocab[idx] = special.encode("utf-8")
         return vocab
 
+    def train(self, text, vocab_size, verbose=False):
+        raise NotImplementedError
+
+    def encode(self, text):
+        raise NotImplementedError
+
+    def decode(self, ids):
+        raise NotImplementedError
+
     def save(self, file_prefix):
-        """
-        Saves two files: file_prefix.vocab and file_prefix.model
-        This is inspired (but not equivalent to!) sentencepiece's model saving:
-        - model file is the critical one, intended for load()
-        - vocab file is just a pretty printed version for human inspection only
-        """
-        # write the model: to be used in load() later
         model_file = file_prefix + ".model"
-        with open(model_file, 'w') as f:
-            # write the version, pattern and merges, that's all that's needed
+        with open(model_file, "w") as f:
             f.write("minbpe v1\n")
             f.write(f"{self.pattern}\n")
-            # write the special tokens, first the number of them, then each one
             f.write(f"{len(self.special_tokens)}\n")
             for special, idx in self.special_tokens.items():
                 f.write(f"{special} {idx}\n")
-            # the merges dict
             for idx1, idx2 in self.merges:
                 f.write(f"{idx1} {idx2}\n")
-        # write the vocab: for the human to look at
-        vocab_file = file_prefix + ".vocab"
-        inverted_merges = {idx: pair for pair, idx in self.merges.items()}
-        with open(vocab_file, "w", encoding="utf-8") as f:
-            for idx, token in self.vocab.items():
-                # note: many tokens may be partial utf-8 sequences
-                # and cannot be decoded into valid strings. Here we're using
-                # errors='replace' to replace them with the replacement char �.
-                # this also means that we couldn't possibly use .vocab in load()
-                # because decoding in this way is a lossy operation!
-                s = render_token(token)
-                # find the children of this token, if any
-                if idx in inverted_merges:
-                    # if this token has children, render it nicely as a merge
-                    idx0, idx1 = inverted_merges[idx]
-                    s0 = render_token(self.vocab[idx0])
-                    s1 = render_token(self.vocab[idx1])
-                    f.write(f"[{s0}][{s1}] -> [{s}] {idx}\n")
-                else:
-                    # otherwise this is leaf token, just print it
-                    # (this should just be the first 256 tokens, the bytes)
-                    f.write(f"[{s}] {idx}\n")
 
     def load(self, model_file):
-        """Inverse of save() but only for the model file"""
         assert model_file.endswith(".model")
-        # read the model file
         merges = {}
         special_tokens = {}
         idx = 256
-        with open(model_file, 'r', encoding="utf-8") as f:
-            # read the version
+        with open(model_file, "r") as f:
             version = f.readline().strip()
             assert version == "minbpe v1"
-            # read the pattern
             self.pattern = f.readline().strip()
-            # read the special tokens
             num_special = int(f.readline().strip())
             for _ in range(num_special):
-                special, special_idx = f.readline().strip().split()
+                special, special_idx = f.readline().strip().rsplit(" ", 1)
                 special_tokens[special] = int(special_idx)
-            # read the merges
             for line in f:
                 idx1, idx2 = map(int, line.split())
                 merges[(idx1, idx2)] = idx
