@@ -21,7 +21,7 @@ dependencies = [
 version = { attr = "variant_gpt.__version__" }
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 
 [project.urls]
 Source = "https://github.com/ValeGian/variantGPT"
