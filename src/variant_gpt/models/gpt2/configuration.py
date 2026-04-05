@@ -11,6 +11,6 @@ class GPT2Config:
     activation_function: str = "gelu_new"
     layer_norm_epsilon: float = 1e-5
     dropout: float = 0.0
-    bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    bias: bool = False  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     flash: bool = False  # use flash attention
     device: str = "cuda"  # device to run on
