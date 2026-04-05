@@ -19,13 +19,12 @@ _encode_chunk.
 """
 
 import heapq
-import os
 from collections import defaultdict
 from multiprocessing import Process, Pipe, cpu_count
 
-import regex as re
 from tqdm import tqdm
 
+import regex as re
 from .base import Tokenizer, get_stats, merge_and_update_stats
 
 GPT2_SPLIT_PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""

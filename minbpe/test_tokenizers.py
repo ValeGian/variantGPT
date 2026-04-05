@@ -9,8 +9,8 @@ Run from the repo root:
 import sys
 import time
 
-from basic import BasicTokenizer
-from regex import RegexTokenizer
+from minbpe.basic import BasicTokenizer
+from minbpe.regex import RegexTokenizer
 
 
 # ---------------------------------------------------------------------------
