@@ -11,7 +11,9 @@ But:
 
 import heapq
 
-from .base import Tokenizer, get_stats, merge, merge_and_update_stats
+from tqdm import tqdm
+
+from .base import Tokenizer, get_stats, merge_and_update_stats
 
 
 class BasicTokenizer(Tokenizer):
@@ -46,7 +48,7 @@ class BasicTokenizer(Tokenizer):
         heap = [(-cnt, pair) for pair, cnt in stats.items()]
         heapq.heapify(heap)
 
-        for i in range(num_merges):
+        for i in tqdm(range(num_merges), total=num_merges):
             # Find the current best pair, skipping any stale heap entries.
             pair = None
             while heap:
