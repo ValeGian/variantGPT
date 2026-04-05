@@ -41,6 +41,104 @@ def merge(ids, pair, idx):
             i += 1
     return newids
 
+
+def merge_and_update_stats(ids, pair, idx, stats):
+    """
+    Merge all occurrences of pair -> idx in ids, updating stats
+    incrementally rather than recomputing from scratch.
+
+    Mutates stats in-place. Returns (new_ids, changed_pairs).
+    changed_pairs is a set of every pair whose count was modified —
+    callers that maintain a priority queue can use it to push fresh
+    entries without rebuilding the whole structure.
+
+    Why this is faster than merge() + get_stats():
+    - merge() + get_stats() touch every element of ids twice: O(n) each.
+    - This function also touches every element once for the merge scan,
+      but the stats update is O(k) where k = number of occurrences of
+      pair (k << n for rare pairs), not O(n).
+    - Total per-iteration cost: O(n) scan + O(k) stats vs O(n) + O(n).
+
+    Correctness notes for the incremental update:
+      For each merged position, three kinds of pairs change:
+        1. Left boundary:  (left_neighbor, p0) → (left_neighbor, idx)
+        2. Right boundary: (p1, right_neighbor) → (idx, right_neighbor)
+        3. Between two consecutive merges: (p1, p0) → (idx, idx)
+      Cases 1 and 2 are skipped when the neighbor is itself a just-merged
+      idx (consecutive merges), to avoid double-counting.
+    """
+    p0, p1 = pair
+    newids = []
+    merged_at = []   # positions in newids where idx was placed
+
+    i = 0
+    while i < len(ids):
+        if i < len(ids) - 1 and ids[i] == p0 and ids[i + 1] == p1:
+            merged_at.append(len(newids))
+            newids.append(idx)
+            i += 2
+        else:
+            newids.append(ids[i])
+            i += 1
+
+    n_merged = len(merged_at)
+    if n_merged == 0:
+        return newids, set()
+
+    changed = set()
+
+    def dec(p):
+        """Decrement count of p, removing the entry when it hits 0."""
+        c = stats.get(p, 0) - 1
+        if c <= 0:
+            stats.pop(p, None)
+        else:
+            stats[p] = c
+        changed.add(p)
+
+    def inc(p):
+        stats[p] = stats.get(p, 0) + 1
+        changed.add(p)
+
+    for j, pos in enumerate(merged_at):
+        is_consecutive   = j > 0      and merged_at[j - 1] == pos - 1
+        next_consecutive = j < n_merged - 1 and merged_at[j + 1] == pos + 1
+
+        # --- left boundary ---
+        # Skip when the left neighbor is another idx we just merged
+        # (that update is handled by the "between" case of the prior step).
+        if pos > 0 and not is_consecutive:
+            left = newids[pos - 1]
+            dec((left, p0))   # old left-boundary pair disappears
+            inc((left, idx))  # new left-boundary pair appears
+
+        # --- right boundary ---
+        # Skip when the right neighbor is another idx we just merged
+        # (that update is handled by the "between" case of this step).
+        if pos < len(newids) - 1 and not next_consecutive:
+            right = newids[pos + 1]
+            dec((p1, right))   # old right-boundary pair disappears
+            inc((idx, right))  # new right-boundary pair appears
+
+        # --- between two consecutive merged positions ---
+        if next_consecutive:
+            dec((p1, p0))    # bridging pair disappears
+            inc((idx, idx))  # new pair between two adjacent idx tokens
+
+    # Remove all n_merged direct occurrences of pair that were consumed.
+    # (Neighboring dec() calls above may have already partially reduced
+    # stats[pair] when pair's own tokens appear as neighbors — e.g. (a,a)
+    # adjacent to another (a,a) — so we adjust the remainder here.)
+    remaining = stats.get(pair, 0) - n_merged
+    if remaining <= 0:
+        stats.pop(pair, None)
+    else:
+        stats[pair] = remaining
+    changed.add(pair)
+
+    return newids, changed
+
+
 # first two helper functions...
 
 
