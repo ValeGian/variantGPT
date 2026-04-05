@@ -10,46 +10,63 @@ from ...activations import ACT2FN
 
 
 class GPT2Attention(nn.Module):
-    def __init__(self, config: GPT2Config, flash=False):
+    def __init__(self, config: GPT2Config, flash=True):
         super().__init__()
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
 
         assert self.n_embd % self.n_head == 0
+        self.head_dim = self.n_embd // self.n_head
 
         # key, query, value projections for all heads, but in a batch
         self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=config.bias)
         # output projection
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=config.bias)
         # regularization
-        self.attn_dropout = nn.Dropout(self.dropout)
-        self.resid_dropout = nn.Dropout(self.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
 
         self.flash = flash
         if not self.flash:
+            self.attn_dropout = nn.Dropout(config.dropout)
             # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                                 .view(1, 1, config.block_size, config.block_size))
+            self.register_buffer(
+                "bias",
+                torch.tril(torch.ones(config.block_size, config.block_size))
+                .view(1, 1, config.block_size, config.block_size)
+            )
 
     def forward(self, x):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, T, hs)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None,
-                                                                 dropout_p=self.dropout if self.training else 0,
-                                                                 is_causal=True)
+            y = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=None,
+                dropout_p=self.dropout if self.training else 0,
+                is_causal=True
+            )
         else:
+            scale = 1.0 / math.sqrt(self.head_dim)
+
             # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            # att = (q @ k.transpose(-2, -1)) * scale
+
+            # torch.baddbmm fuses the scaled matmul into a single BLAS call instead of a separate multiply + scale
+            att = torch.baddbmm(
+                torch.zeros(B * self.n_head, T, T, device=x.device, dtype=x.dtype),
+                q.reshape(B * self.n_head, T, self.head_dim),
+                k.reshape(B * self.n_head, self.head_dim, T),
+                alpha=scale,
+            ).view(B, self.n_head, T, T)
             att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
@@ -64,15 +81,15 @@ class GPT2Attention(nn.Module):
 class GPT2MLP(nn.Module):
     def __init__(self, config: GPT2Config):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias),
-            ACT2FN[config.activation_function],
-            nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias),
-            nn.Dropout(config.dropout)
-        )
+        self.fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.act = ACT2FN[config.activation_function]
+        self.proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.drop = nn.Dropout(config.dropout)
 
     def forward(self, x: Optional[tuple[torch.FloatTensor]]) -> torch.FloatTensor:
-        return self.net(x)
+        # Explicit forward avoids nn.Sequential overhead and lets torch.compile
+        # fuse the activation into the linear kernel more easily.
+        return self.drop(self.proj(self.act(self.fc(x))))
 
 
 class GPT2Block(nn.Module):
@@ -101,7 +118,7 @@ class GPT2Model(nn.Module):
             wte=nn.Embedding(config.vocab_size, config.n_embd),
             wpe=nn.Embedding(config.block_size, config.n_embd),
             drop=nn.Dropout(config.dropout),
-            h=nn.Sequential(*[GPT2Block(config) for _ in range(config.n_layer)]),
+            h=nn.ModuleList([GPT2Block(config) for _ in range(config.n_layer)]),
             ln_f=nn.LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -114,10 +131,21 @@ class GPT2Model(nn.Module):
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
 
+        # pre-register position indices to avoid re-allocation every forward pass
+        self.register_buffer(
+            "_pos",
+            torch.arange(config.block_size, dtype=torch.long),
+            persistent=False,
+        )
+
         self.to(config.device)
 
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def get_num_params(self, non_embedding=True):
         """
@@ -139,17 +167,27 @@ class GPT2Model(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
     def forward(self, idx, targets=None):
         device = idx.device
         b, t = idx.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
+        assert t <= self.config.block_size, (
+            f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        )
 
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
+        # Embedding — use pre-registered buffer, slice to avoid copy
+        tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
+        pos_emb = self.transformer.wpe(self._pos[:t])  # (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        x = self.transformer.h(x)
+
+        # Transformer blocks — plain loop is compile-friendly; nn.Sequential
+        # wrapping a ModuleList is kept for checkpointing flexibility
+        for block in self.transformer.h:
+            x = block(x)
+
         x = self.transformer.ln_f(x)
 
         if targets is not None:
@@ -179,6 +217,10 @@ class GPT2Model(nn.Module):
         mfu = flops_achieved / flops_promised
         return mfu
 
+    # ------------------------------------------------------------------
+    # Generation
+    # ------------------------------------------------------------------
+
     @torch.no_grad()
     def generate(
         self,
@@ -202,29 +244,38 @@ class GPT2Model(nn.Module):
             The generated tokens.
         """
         for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
-            cropped_input = input_tokens if input_tokens.size(1) <= self.config.block_size else input_tokens[:, -self.config.block_size:]
+            # crop context to block_size if needed
+            ctx = (
+                input_tokens
+                if input_tokens.size(1) <= self.config.block_size
+                else input_tokens[:, -self.config.block_size:]
+            )
+
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(cropped_input)
+            logits, _ = self(ctx)
             # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
+            logits = logits[:, -1, :] / temperature  # (B, vocab)
 
-            # optionally crop the logits to only the top k options
+            # --- top-k gate (applied to logits, before softmax) ---
             if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
+                k = min(top_k, logits.size(-1))
+                threshold, _ = torch.topk(logits, k)
+                logits = logits.masked_fill(logits < threshold[:, [-1]], float("-inf"))
 
-            # apply softmax to convert logits to (normalized) probabilities
+            # --- single softmax ---
             probs = F.softmax(logits, dim=-1)
 
+            # --- top-p (nucleus) gate (applied to probs) ---
             if top_p is not None:
-                sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-                cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-                sorted_indices_to_remove = cumulative_probs > top_p
-                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                sorted_indices_to_remove[..., 0] = 0
-                indices_to_remove = torch.zeros_like(logits).scatter_(1, sorted_indices, sorted_indices_to_remove)
-                probs[indices_to_remove] = 0.0
+                sorted_probs, sorted_idx = torch.sort(probs, descending=True, dim=-1)
+                cumulative = sorted_probs.cumsum(dim=-1)
+
+                # shift right so the first token above the threshold is kept
+                sorted_mask = (cumulative - sorted_probs) > top_p
+                sorted_probs = sorted_probs.masked_fill(sorted_mask, 0.0)
+
+                # scatter back to original vocab ordering and renormalize
+                probs = torch.zeros_like(probs).scatter_(1, sorted_idx, sorted_probs)
                 probs = probs / probs.sum(dim=-1, keepdim=True)
 
             # sample from the distribution
@@ -238,43 +289,3 @@ class GPT2Model(nn.Module):
 __all__ = [
     "GPT2Model",
 ]
-
-if __name__ == "__main__":
-    # Example usage
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    config = GPT2Config(
-        block_size=1024,
-        vocab_size=16394,
-        n_layer=1,
-        n_head=8,
-        n_embd=512,
-        dropout=0.2,
-        bias=True,
-        flash=False,
-        device=device
-    )
-    model = GPT2Model(config)
-
-    model_size = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model created with {config.n_embd=}, {config.n_head=}, head_size={config.n_embd//config.n_head}")
-
-    # Create dummy input
-    input_tokens = torch.randint(0, config.vocab_size, (2, 50), device=device)
-
-    # Test forward pass
-    # Use input as target for testing shape
-    logits, loss = model(input_tokens, targets=input_tokens)
-    if loss is not None:
-        print("Loss:", loss.item())
-
-    # Test generation
-    print("Generating...")
-    # Start generation from first 10 tokens
-    generated_tokens = model.generate(
-        input_tokens[:, :10],
-        max_new_tokens=20,
-        temperature=0.8,
-        top_k=10
-    )
-    print("Generated tokens shape:", generated_tokens.shape)
-    print("Generated sequence example (first batch):\n", generated_tokens[0].tolist())
