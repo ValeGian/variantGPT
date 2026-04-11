@@ -101,4 +101,3 @@ class TrainConfig:
             return max(self.min_lr, self.learning_rate * decay)
 
         raise ValueError(f"Unknown lr_schedule: {self.lr_schedule}")
-

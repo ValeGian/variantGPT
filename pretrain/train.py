@@ -19,15 +19,15 @@ Override any config field from the CLI:
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import os
-import shutil
 import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
 
+import mlflow
+import mlflow.pytorch
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -86,6 +86,49 @@ def cleanup_distributed() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  MLflow helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def setup_mlflow(cfg: TrainConfig, resume_run_id: str | None = None) -> str:
+    """
+    Start (or resume) an MLflow run and log all hyperparameters.
+    Returns the active run_id so it can be persisted in checkpoints.
+    """
+    # Experiment is set via MLFLOW_EXPERIMENT_NAME env var;
+    # URI + credentials via MLFLOW_TRACKING_URI / USERNAME / PASSWORD.
+    if resume_run_id:
+        mlflow.start_run(run_id=resume_run_id)
+        log(f"MLflow: resumed run {resume_run_id}")
+    else:
+        mlflow.start_run(run_name=cfg.run_name)
+        log(f"MLflow: started new run {mlflow.active_run().info.run_id}")
+
+    # Log every config field as a param (safe on resume — skip if already set)
+    import dataclasses
+    params = {f.name: getattr(cfg, f.name)
+              for f in dataclasses.fields(cfg)
+              if f.name != "run_dir"}
+    try:
+        mlflow.log_params(params)
+    except mlflow.exceptions.MlflowException:
+        # Params already logged from a previous run segment — that's fine
+        pass
+
+    return mlflow.active_run().info.run_id
+
+
+def log_metrics_mlflow(metrics: dict[str, float], step: int) -> None:
+    """Convenience wrapper — only calls MLflow on rank 0."""
+    if is_main_process():
+        mlflow.log_metrics(metrics, step=step)
+
+
+def end_mlflow() -> None:
+    if is_main_process() and mlflow.active_run():
+        mlflow.end_run()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Checkpoint management
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -98,6 +141,7 @@ def save_checkpoint(
     best_val_loss: float,
     patience_counter: int,
     train_loss: float,
+    mlflow_run_id: str | None = None,
     tag: str = "step",
 ) -> Path:
     """
@@ -114,6 +158,7 @@ def save_checkpoint(
         "best_val_loss": best_val_loss,
         "patience_counter": patience_counter,
         "train_loss": train_loss,
+        "mlflow_run_id": mlflow_run_id,
         "config": {k: v for k, v in vars(cfg).items() if not isinstance(v, Path)},
     }
 
@@ -299,6 +344,7 @@ def train(cfg: TrainConfig) -> None:
     best_val_loss = float("inf")
     patience_counter = 0
     epoch = 0
+    resume_run_id = None
 
     ckpt_path = Path(cfg.resume_from) if cfg.resume_from else find_latest_checkpoint(cfg)
     if ckpt_path is not None and ckpt_path.exists():
@@ -307,9 +353,24 @@ def train(cfg: TrainConfig) -> None:
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
         patience_counter = ckpt.get("patience_counter", 0)
         epoch = ckpt.get("epoch", 0)
+        resume_run_id = ckpt.get("mlflow_run_id", None)
         log(f"Resumed from step {start_step}, best_val_loss={best_val_loss:.4f}")
     else:
         log("Starting from scratch (no checkpoint found)")
+
+    # ── MLflow (rank 0 only) ──────────────────────────────────────────────
+    mlflow_run_id: str | None = None
+    if master:
+        mlflow_run_id = setup_mlflow(cfg, resume_run_id=resume_run_id)
+        mlflow.set_tags({
+            "model_params": f"{n_params:,}",
+            "world_size": world_size,
+            "device_type": device_type,
+            "dtype": cfg.dtype,
+            "tokens_per_step": tokens_per_step,
+            "train_samples": len(train_loader.dataset),
+            "val_samples": len(val_loader.dataset),
+        })
 
     # ── DDP wrapper (after loading weights so all ranks match) ────────────
     if distributed:
@@ -391,21 +452,42 @@ def train(cfg: TrainConfig) -> None:
             dt = time.perf_counter() - t0
             avg_loss = running_loss / cfg.log_interval
             tok_per_sec = tokens_per_step * cfg.log_interval / dt
+            tokens_seen = (step + 1) * tokens_per_step
+            ppl = math.exp(min(avg_loss, 20))  # cap to avoid overflow
             print(
                 f"step {step+1:>7d}/{cfg.max_steps} | "
                 f"loss {avg_loss:.4f} | "
+                f"ppl {ppl:.1f} | "
                 f"lr {lr:.2e} | "
                 f"grad_norm {grad_norm:.2f} | "
                 f"{tok_per_sec:,.0f} tok/s"
             )
+            log_metrics_mlflow({
+                "train/loss": avg_loss,
+                "train/perplexity": ppl,
+                "train/learning_rate": lr,
+                "train/grad_norm": grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm,
+                "train/tokens_per_sec": tok_per_sec,
+                "train/tokens_seen": tokens_seen,
+                "train/epoch": epoch,
+            }, step=step + 1)
             running_loss = 0.0
             t0 = time.perf_counter()
 
         # ── Validation + early stopping ───────────────────────────────────
         if (step + 1) % cfg.val_interval == 0:
             val_loss = validate(model, val_loader, cfg, device, amp_ctx)
-            log(f"  → val_loss = {val_loss:.4f}  (best = {best_val_loss:.4f}, "
+            val_ppl = math.exp(min(val_loss, 20))
+            log(f"  → val_loss = {val_loss:.4f}  val_ppl = {val_ppl:.1f}  "
+                f"(best = {best_val_loss:.4f}, "
                 f"patience = {patience_counter}/{cfg.patience})")
+
+            log_metrics_mlflow({
+                "val/loss": val_loss,
+                "val/perplexity": val_ppl,
+                "val/best_loss": best_val_loss,
+                "val/patience_counter": patience_counter,
+            }, step=step + 1)
 
             improved = val_loss < best_val_loss - cfg.min_delta
             if improved:
@@ -413,6 +495,7 @@ def train(cfg: TrainConfig) -> None:
                 patience_counter = 0
                 if master:
                     save_best(cfg, model, step + 1, val_loss)
+                    log_metrics_mlflow({"val/best_loss": best_val_loss}, step=step + 1)
             else:
                 patience_counter += 1
 
@@ -423,7 +506,10 @@ def train(cfg: TrainConfig) -> None:
                     save_checkpoint(
                         cfg, model, optimizer, step + 1, epoch,
                         best_val_loss, patience_counter, train_loss,
+                        mlflow_run_id=mlflow_run_id,
                     )
+                    mlflow.set_tag("stop_reason", "early_stopping")
+                    mlflow.log_metric("final/step", step + 1)
                 break
 
         # ── Periodic checkpoint ───────────────────────────────────────────
@@ -431,6 +517,7 @@ def train(cfg: TrainConfig) -> None:
             save_checkpoint(
                 cfg, model, optimizer, step + 1, epoch,
                 best_val_loss, patience_counter, train_loss,
+                mlflow_run_id=mlflow_run_id,
             )
             log(f"  Checkpoint saved at step {step+1}")
 
@@ -438,11 +525,23 @@ def train(cfg: TrainConfig) -> None:
     if master:
         save_checkpoint(
             cfg, model, optimizer, step + 1, epoch,
-            best_val_loss, patience_counter, train_loss, tag="final",
+            best_val_loss, patience_counter, train_loss,
+            mlflow_run_id=mlflow_run_id, tag="final",
         )
         log(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
         log(f"Outputs in: {cfg.run_dir}")
 
+        # ── Final MLflow logging ──────────────────────────────────────────
+        mlflow.log_metrics({
+            "final/best_val_loss": best_val_loss,
+            "final/best_val_perplexity": math.exp(min(best_val_loss, 20)),
+            "final/total_steps": step + 1,
+            "final/total_tokens_seen": (step + 1) * tokens_per_step,
+        }, step=step + 1)
+        if not mlflow.active_run().info.tags.get("stop_reason"):
+            mlflow.set_tag("stop_reason", "max_steps")
+
+    end_mlflow()
     cleanup_distributed()
 
 
@@ -480,4 +579,3 @@ def parse_args() -> TrainConfig:
 if __name__ == "__main__":
     cfg = parse_args()
     train(cfg)
-
