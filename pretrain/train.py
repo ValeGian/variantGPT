@@ -62,6 +62,26 @@ def log(msg: str) -> None:
         print(msg, flush=True)
 
 
+def fmt_duration(seconds: float) -> str:
+    """Format seconds into a compact human-readable string."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    d, h = divmod(h, 24)
+    parts = []
+    if d:
+        parts.append(f"{d}d")
+    if h:
+        parts.append(f"{h}h")
+    if m:
+        parts.append(f"{m}m")
+    if s or not parts:
+        parts.append(f"{s}s")
+    return "".join(parts)
+
+
 def setup_distributed() -> tuple[int, int, int, str]:
     """
     Initialise DDP if launched via torchrun, else fall back to single-GPU.
@@ -386,7 +406,8 @@ def train(cfg: TrainConfig) -> None:
     model.train()
     train_iter = iter(train_loader)
     running_loss = 0.0
-    t0 = time.perf_counter()
+    t_start = time.perf_counter()  # wall clock for elapsed / ETA
+    t0 = time.perf_counter()       # interval timer for tok/s
 
     log(f"\nStarting training from step {start_step} → {cfg.max_steps}")
     log(f"LR schedule: {cfg.lr_schedule}  warmup={cfg.warmup_steps}  "
@@ -460,13 +481,26 @@ def train(cfg: TrainConfig) -> None:
             tok_per_sec = tokens_per_step * cfg.log_interval / dt
             tokens_seen = (step + 1) * tokens_per_step
             ppl = math.exp(min(avg_loss, 20))  # cap to avoid overflow
+
+            # Elapsed and ETA based on steps done in this session
+            elapsed = time.perf_counter() - t_start
+            steps_done_session = step + 1 - start_step
+            steps_remaining = cfg.max_steps - (step + 1)
+            if steps_done_session > 0:
+                sec_per_step = elapsed / steps_done_session
+                eta = sec_per_step * steps_remaining
+            else:
+                eta = 0.0
+
             print(
                 f"step {step+1:>7d}/{cfg.max_steps} | "
                 f"loss {avg_loss:.4f} | "
                 f"ppl {ppl:.1f} | "
                 f"lr {lr:.2e} | "
                 f"grad_norm {grad_norm:.2f} | "
-                f"{tok_per_sec:,.0f} tok/s"
+                f"{tok_per_sec:,.0f} tok/s | "
+                f"elapsed {fmt_duration(elapsed)} | "
+                f"eta {fmt_duration(eta)}"
             )
             log_metrics_mlflow({
                 "train/loss": avg_loss,
@@ -476,6 +510,8 @@ def train(cfg: TrainConfig) -> None:
                 "train/tokens_per_sec": tok_per_sec,
                 "train/tokens_seen": tokens_seen,
                 "train/epoch": epoch,
+                "train/elapsed_hours": elapsed / 3600,
+                "train/eta_hours": eta / 3600,
             }, step=step + 1)
             running_loss = 0.0
             t0 = time.perf_counter()
@@ -528,13 +564,15 @@ def train(cfg: TrainConfig) -> None:
             log(f"  Checkpoint saved at step {step+1}")
 
     # ── Final save ────────────────────────────────────────────────────────
+    total_elapsed = time.perf_counter() - t_start
     if master:
         save_checkpoint(
             cfg, model, optimizer, step + 1, epoch,
             best_val_loss, patience_counter, train_loss,
             mlflow_run_id=mlflow_run_id, tag="final",
         )
-        log(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
+        log(f"\nTraining complete in {fmt_duration(total_elapsed)}. "
+            f"Best val loss: {best_val_loss:.4f}")
         log(f"Outputs in: {cfg.run_dir}")
 
         # ── Final MLflow logging ──────────────────────────────────────────
@@ -543,6 +581,7 @@ def train(cfg: TrainConfig) -> None:
             "final/best_val_perplexity": math.exp(min(best_val_loss, 20)),
             "final/total_steps": step + 1,
             "final/total_tokens_seen": (step + 1) * tokens_per_step,
+            "final/elapsed_hours": total_elapsed / 3600,
         }, step=step + 1)
         if not mlflow.active_run().info.tags.get("stop_reason"):
             mlflow.set_tag("stop_reason", "max_steps")
