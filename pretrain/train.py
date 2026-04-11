@@ -293,6 +293,7 @@ def train(cfg: TrainConfig) -> None:
     tokenizer = RegexTokenizer()
     tokenizer.load(cfg.tokenizer_path)
     vocab_size = get_vocab_size(tokenizer)
+    del tokenizer
     log(f"Vocab size: {vocab_size:,}")
 
     # Determine numpy dtype (must match what the tokeniser pipeline wrote)
