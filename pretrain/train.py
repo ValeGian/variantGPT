@@ -88,12 +88,6 @@ def setup_distributed() -> tuple[int, int, int, str]:
     Returns (rank, local_rank, world_size, device).
     """
     if "RANK" in os.environ:
-        # On single-node runs the system hostname may not resolve to a
-        # reachable address (e.g. cloud VMs with internal DNS issues).
-        # Force localhost so NCCL/TCP store can always connect.
-        if os.environ.get("MASTER_ADDR", "") in ("", os.uname().nodename):
-            os.environ["MASTER_ADDR"] = "127.0.0.1"
-
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
