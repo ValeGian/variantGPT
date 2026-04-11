@@ -114,8 +114,6 @@ def setup_mlflow(cfg: TrainConfig, resume_run_id: str | None = None) -> str:
     Start (or resume) an MLflow run and log all hyperparameters.
     Returns the active run_id so it can be persisted in checkpoints.
     """
-    # Experiment is set via MLFLOW_EXPERIMENT_NAME env var;
-    # URI + credentials via MLFLOW_TRACKING_URI / USERNAME / PASSWORD.
     if resume_run_id:
         mlflow.start_run(run_id=resume_run_id)
         log(f"MLflow: resumed run {resume_run_id}")
@@ -123,15 +121,13 @@ def setup_mlflow(cfg: TrainConfig, resume_run_id: str | None = None) -> str:
         mlflow.start_run(run_name=cfg.run_name)
         log(f"MLflow: started new run {mlflow.active_run().info.run_id}")
 
-    # Log every config field as a param (safe on resume — skip if already set)
     import dataclasses
     params = {f.name: getattr(cfg, f.name)
               for f in dataclasses.fields(cfg)
-              if f.name != "run_dir"}
+              if f.name not in ("run_dir", "total_steps")}
     try:
         mlflow.log_params(params)
     except mlflow.exceptions.MlflowException:
-        # Params already logged from a previous run segment — that's fine
         pass
 
     return mlflow.active_run().info.run_id
@@ -315,7 +311,16 @@ def train(cfg: TrainConfig) -> None:
         f"Val samples: {len(val_loader.dataset):,}")
 
     tokens_per_step = cfg.micro_batch_size * cfg.block_size * cfg.grad_accum_steps * world_size
+
+    # ── Compute total steps from dataset size and num_epochs ──────────────
+    # Each optimiser step consumes grad_accum_steps micro-batches.
+    # In DDP each rank sees len(train_loader) micro-batches per epoch.
+    steps_per_epoch = len(train_loader) // cfg.grad_accum_steps
+    cfg.set_total_steps(steps_per_epoch)
+
     log(f"Tokens per optimiser step: {tokens_per_step:,}")
+    log(f"Steps per epoch: {steps_per_epoch:,}  |  "
+        f"Total steps ({cfg.num_epochs} epochs): {cfg.total_steps:,}")
 
     # ── Model ─────────────────────────────────────────────────────────────
     model_cfg = GPT2Config(
@@ -361,20 +366,21 @@ def train(cfg: TrainConfig) -> None:
 
     # ── Resume ────────────────────────────────────────────────────────────
     start_step = 0
+    start_epoch = 0
     best_val_loss = float("inf")
     patience_counter = 0
-    epoch = 0
     resume_run_id = None
 
     ckpt_path = Path(cfg.resume_from) if cfg.resume_from else find_latest_checkpoint(cfg)
     if ckpt_path is not None and ckpt_path.exists():
         ckpt = load_checkpoint(ckpt_path, model, optimizer, device)
         start_step = ckpt.get("step", 0)
+        start_epoch = ckpt.get("epoch", 0)
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
         patience_counter = ckpt.get("patience_counter", 0)
-        epoch = ckpt.get("epoch", 0)
         resume_run_id = ckpt.get("mlflow_run_id", None)
-        log(f"Resumed from step {start_step}, best_val_loss={best_val_loss:.4f}")
+        log(f"Resumed from step {start_step} (epoch {start_epoch}), "
+            f"best_val_loss={best_val_loss:.4f}")
     else:
         log("Starting from scratch (no checkpoint found)")
 
@@ -382,6 +388,7 @@ def train(cfg: TrainConfig) -> None:
     mlflow_run_id: str | None = None
     if master:
         mlflow_run_id = setup_mlflow(cfg, resume_run_id=resume_run_id)
+        mlflow.log_param("total_steps", cfg.total_steps)
         mlflow.set_tags({
             "model_params": f"{n_params:,}",
             "world_size": world_size,
@@ -398,170 +405,205 @@ def train(cfg: TrainConfig) -> None:
 
     # ── Training state ────────────────────────────────────────────────────
     model.train()
-    train_iter = iter(train_loader)
     running_loss = 0.0
+    train_loss = 0.0
     t_start = time.perf_counter()  # wall clock for elapsed / ETA
     t0 = time.perf_counter()       # interval timer for tok/s
+    step = start_step
+    early_stopped = False
 
-    log(f"\nStarting training from step {start_step} → {cfg.max_steps}")
+    log(f"\nStarting training from epoch {start_epoch} (step {start_step}) "
+        f"→ {cfg.num_epochs} epochs ({cfg.total_steps} steps)")
     log(f"LR schedule: {cfg.lr_schedule}  warmup={cfg.warmup_steps}  "
         f"peak={cfg.learning_rate}  min={cfg.min_lr}")
     log("")
 
-    for step in range(start_step, cfg.max_steps):
-        # ── Set LR for this step ──────────────────────────────────────────
-        lr = cfg.get_lr(step)
-        for pg in optimizer.param_groups:
-            pg["lr"] = lr
+    for epoch in range(start_epoch, cfg.num_epochs):
+        if distributed:
+            train_loader.sampler.set_epoch(epoch)
 
-        # ── Gradient accumulation loop ────────────────────────────────────
-        optimizer.zero_grad(set_to_none=True)
-        accum_loss = 0.0
+        micro_iter = iter(train_loader)
+        micro_consumed = 0  # micro-batches consumed this epoch
 
-        for micro_step in range(cfg.grad_accum_steps):
-            # Fetch next batch; wrap around epochs
-            try:
-                x, y = next(train_iter)
-            except StopIteration:
-                epoch += 1
-                if distributed:
-                    train_loader.sampler.set_epoch(epoch)
-                train_iter = iter(train_loader)
-                x, y = next(train_iter)
+        # If resuming mid-epoch, skip already-seen micro-batches
+        micro_to_skip = (start_step - epoch * steps_per_epoch) * cfg.grad_accum_steps
+        if epoch == start_epoch and micro_to_skip > 0:
+            for _ in range(min(micro_to_skip, len(train_loader))):
+                try:
+                    next(micro_iter)
+                    micro_consumed += 1
+                except StopIteration:
+                    break
 
-            x = x.to(device, non_blocking=True).long()
-            y = y.to(device, non_blocking=True).long()
+        log(f"── Epoch {epoch + 1}/{cfg.num_epochs} ──")
 
-            # In DDP, only sync gradients on the last micro-step
-            sync_ctx = (
-                model.no_sync()
-                if distributed and micro_step < cfg.grad_accum_steps - 1
-                else nullcontext()
-            )
+        while True:
+            # ── Collect grad_accum_steps micro-batches ────────────────────
+            batches = []
+            for _ in range(cfg.grad_accum_steps):
+                try:
+                    batch = next(micro_iter)
+                    micro_consumed += 1
+                    batches.append(batch)
+                except StopIteration:
+                    break  # epoch exhausted
 
-            with sync_ctx:
-                with amp_ctx:
-                    _, loss = model(x, y)
-                    # Scale loss by accum steps so the effective loss is
-                    # the mean over all micro-batches
-                    scaled_loss = loss / cfg.grad_accum_steps
+            if not batches:
+                break  # move to next epoch
 
-                if scaler is not None:
-                    scaler.scale(scaled_loss).backward()
+            # If the epoch ended mid-accumulation we still train on what
+            # we got, but scale the loss accordingly.
+            actual_accum = len(batches)
+
+            # ── Set LR for this step ──────────────────────────────────────
+            lr = cfg.get_lr(step)
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr
+
+            # ── Gradient accumulation loop ────────────────────────────────
+            optimizer.zero_grad(set_to_none=True)
+            accum_loss = 0.0
+
+            for micro_step, (x, y) in enumerate(batches):
+                x = x.to(device, non_blocking=True).long()
+                y = y.to(device, non_blocking=True).long()
+
+                sync_ctx = (
+                    model.no_sync()
+                    if distributed and micro_step < actual_accum - 1
+                    else nullcontext()
+                )
+
+                with sync_ctx:
+                    with amp_ctx:
+                        _, loss = model(x, y)
+                        scaled_loss = loss / actual_accum
+
+                    if scaler is not None:
+                        scaler.scale(scaled_loss).backward()
+                    else:
+                        scaled_loss.backward()
+
+                accum_loss += loss.item()
+
+            # ── Gradient clipping ─────────────────────────────────────────
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip,)
+
+            # ── Optimiser step ────────────────────────────────────────────
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+
+            step += 1
+
+            # ── Logging ───────────────────────────────────────────────────
+            train_loss = accum_loss / actual_accum
+            running_loss += train_loss
+
+            if step % cfg.log_interval == 0 and master:
+                dt = time.perf_counter() - t0
+                avg_loss = running_loss / cfg.log_interval
+                tok_per_sec = tokens_per_step * cfg.log_interval / dt
+                tokens_seen = step * tokens_per_step
+                ppl = math.exp(min(avg_loss, 20))
+
+                elapsed = time.perf_counter() - t_start
+                steps_done_session = step - start_step
+                steps_remaining = cfg.total_steps - step
+                if steps_done_session > 0:
+                    sec_per_step = elapsed / steps_done_session
+                    eta = sec_per_step * steps_remaining
                 else:
-                    scaled_loss.backward()
+                    eta = 0.0
 
-            accum_loss += loss.item()
+                print(
+                    f"step {step:>7d}/{cfg.total_steps} | "
+                    f"epoch {epoch+1}/{cfg.num_epochs} | "
+                    f"loss {avg_loss:.4f} | "
+                    f"ppl {ppl:.1f} | "
+                    f"lr {lr:.2e} | "
+                    f"grad_norm {grad_norm:.2f} | "
+                    f"{tok_per_sec:,.0f} tok/s | "
+                    f"elapsed {fmt_duration(elapsed)} | "
+                    f"eta {fmt_duration(eta)}"
+                )
+                log_metrics_mlflow({
+                    "train/loss": avg_loss,
+                    "train/perplexity": ppl,
+                    "train/learning_rate": lr,
+                    "train/grad_norm": (grad_norm.item()
+                                        if torch.is_tensor(grad_norm)
+                                        else grad_norm),
+                    "train/tokens_per_sec": tok_per_sec,
+                    "train/tokens_seen": tokens_seen,
+                    "train/epoch": epoch,
+                    "train/elapsed_hours": elapsed / 3600,
+                    "train/eta_hours": eta / 3600,
+                }, step=step)
+                running_loss = 0.0
+                t0 = time.perf_counter()
 
-        # ── Gradient clipping ─────────────────────────────────────────────
-        if scaler is not None:
-            scaler.unscale_(optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            # ── Validation + early stopping ───────────────────────────────
+            if step % cfg.val_interval == 0:
+                val_loss = validate(model, val_loader, cfg, device, amp_ctx)
+                val_ppl = math.exp(min(val_loss, 20))
+                log(f"  → val_loss = {val_loss:.4f}  val_ppl = {val_ppl:.1f}  "
+                    f"(best = {best_val_loss:.4f}, "
+                    f"patience = {patience_counter}/{cfg.patience})")
 
-        # ── Optimiser step ────────────────────────────────────────────────
-        if scaler is not None:
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            optimizer.step()
+                log_metrics_mlflow({
+                    "val/loss": val_loss,
+                    "val/perplexity": val_ppl,
+                    "val/best_loss": best_val_loss,
+                    "val/patience_counter": patience_counter,
+                }, step=step)
 
-        # ── Logging ───────────────────────────────────────────────────────
-        train_loss = accum_loss / cfg.grad_accum_steps
-        running_loss += train_loss
+                improved = val_loss < best_val_loss - cfg.min_delta
+                if improved:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    if master:
+                        save_best(cfg, model, step, val_loss)
+                        log_metrics_mlflow(
+                            {"val/best_loss": best_val_loss}, step=step,
+                        )
+                else:
+                    patience_counter += 1
 
-        if (step + 1) % cfg.log_interval == 0 and master:
-            dt = time.perf_counter() - t0
-            avg_loss = running_loss / cfg.log_interval
-            tok_per_sec = tokens_per_step * cfg.log_interval / dt
-            tokens_seen = (step + 1) * tokens_per_step
-            ppl = math.exp(min(avg_loss, 20))  # cap to avoid overflow
+                if patience_counter >= cfg.patience:
+                    log(f"Early stopping triggered at step {step}.")
+                    if master:
+                        save_checkpoint(
+                            cfg, model, optimizer, step, epoch,
+                            best_val_loss, patience_counter, train_loss,
+                            mlflow_run_id=mlflow_run_id,
+                        )
+                        mlflow.set_tag("stop_reason", "early_stopping")
+                        mlflow.log_metric("final/step", step)
+                    early_stopped = True
+                    break
 
-            # Elapsed and ETA based on steps done in this session
-            elapsed = time.perf_counter() - t_start
-            steps_done_session = step + 1 - start_step
-            steps_remaining = cfg.max_steps - (step + 1)
-            if steps_done_session > 0:
-                sec_per_step = elapsed / steps_done_session
-                eta = sec_per_step * steps_remaining
-            else:
-                eta = 0.0
+            # ── Periodic checkpoint ───────────────────────────────────────
+            if step % cfg.ckpt_interval == 0 and master:
+                save_checkpoint(
+                    cfg, model, optimizer, step, epoch,
+                    best_val_loss, patience_counter, train_loss,
+                    mlflow_run_id=mlflow_run_id,
+                )
+                log(f"  Checkpoint saved at step {step}")
 
-            print(
-                f"step {step+1:>7d}/{cfg.max_steps} | "
-                f"loss {avg_loss:.4f} | "
-                f"ppl {ppl:.1f} | "
-                f"lr {lr:.2e} | "
-                f"grad_norm {grad_norm:.2f} | "
-                f"{tok_per_sec:,.0f} tok/s | "
-                f"elapsed {fmt_duration(elapsed)} | "
-                f"eta {fmt_duration(eta)}"
-            )
-            log_metrics_mlflow({
-                "train/loss": avg_loss,
-                "train/perplexity": ppl,
-                "train/learning_rate": lr,
-                "train/grad_norm": grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm,
-                "train/tokens_per_sec": tok_per_sec,
-                "train/tokens_seen": tokens_seen,
-                "train/epoch": epoch,
-                "train/elapsed_hours": elapsed / 3600,
-                "train/eta_hours": eta / 3600,
-            }, step=step + 1)
-            running_loss = 0.0
-            t0 = time.perf_counter()
-
-        # ── Validation + early stopping ───────────────────────────────────
-        if (step + 1) % cfg.val_interval == 0:
-            val_loss = validate(model, val_loader, cfg, device, amp_ctx)
-            val_ppl = math.exp(min(val_loss, 20))
-            log(f"  → val_loss = {val_loss:.4f}  val_ppl = {val_ppl:.1f}  "
-                f"(best = {best_val_loss:.4f}, "
-                f"patience = {patience_counter}/{cfg.patience})")
-
-            log_metrics_mlflow({
-                "val/loss": val_loss,
-                "val/perplexity": val_ppl,
-                "val/best_loss": best_val_loss,
-                "val/patience_counter": patience_counter,
-            }, step=step + 1)
-
-            improved = val_loss < best_val_loss - cfg.min_delta
-            if improved:
-                best_val_loss = val_loss
-                patience_counter = 0
-                if master:
-                    save_best(cfg, model, step + 1, val_loss)
-                    log_metrics_mlflow({"val/best_loss": best_val_loss}, step=step + 1)
-            else:
-                patience_counter += 1
-
-            # Early stopping (all ranks must agree, counter is synchronised)
-            if patience_counter >= cfg.patience:
-                log(f"Early stopping triggered at step {step+1}.")
-                if master:
-                    save_checkpoint(
-                        cfg, model, optimizer, step + 1, epoch,
-                        best_val_loss, patience_counter, train_loss,
-                        mlflow_run_id=mlflow_run_id,
-                    )
-                    mlflow.set_tag("stop_reason", "early_stopping")
-                    mlflow.log_metric("final/step", step + 1)
-                break
-
-        # ── Periodic checkpoint ───────────────────────────────────────────
-        if (step + 1) % cfg.ckpt_interval == 0 and master:
-            save_checkpoint(
-                cfg, model, optimizer, step + 1, epoch,
-                best_val_loss, patience_counter, train_loss,
-                mlflow_run_id=mlflow_run_id,
-            )
-            log(f"  Checkpoint saved at step {step+1}")
+        if early_stopped:
+            break
 
     # ── Final save ────────────────────────────────────────────────────────
     total_elapsed = time.perf_counter() - t_start
     if master:
         save_checkpoint(
-            cfg, model, optimizer, step + 1, epoch,
+            cfg, model, optimizer, step, epoch,
             best_val_loss, patience_counter, train_loss,
             mlflow_run_id=mlflow_run_id, tag="final",
         )
@@ -569,16 +611,16 @@ def train(cfg: TrainConfig) -> None:
             f"Best val loss: {best_val_loss:.4f}")
         log(f"Outputs in: {cfg.run_dir}")
 
-        # ── Final MLflow logging ──────────────────────────────────────────
         mlflow.log_metrics({
             "final/best_val_loss": best_val_loss,
             "final/best_val_perplexity": math.exp(min(best_val_loss, 20)),
-            "final/total_steps": step + 1,
-            "final/total_tokens_seen": (step + 1) * tokens_per_step,
+            "final/total_steps": step,
+            "final/total_epochs": epoch + 1,
+            "final/total_tokens_seen": step * tokens_per_step,
             "final/elapsed_hours": total_elapsed / 3600,
-        }, step=step + 1)
+        }, step=step)
         if not mlflow.active_run().info.tags.get("stop_reason"):
-            mlflow.set_tag("stop_reason", "max_steps")
+            mlflow.set_tag("stop_reason", "completed_epochs")
 
     end_mlflow()
     cleanup_distributed()
@@ -607,16 +649,17 @@ def parse_args() -> TrainConfig:
     cfg = TrainConfig()
     parser = argparse.ArgumentParser(description="GPT-2 Pretraining")
 
+    skip = {"run_dir", "total_steps"}  # derived fields
     for f in dataclasses.fields(cfg):
-        if f.name == "run_dir":
-            continue  # derived field
+        if f.name in skip:
+            continue
         annotation = f.type if isinstance(f.type, str) else f.type.__name__
-        arg_type = _TYPE_MAP.get(annotation, str)  # fall back to str
+        arg_type = _TYPE_MAP.get(annotation, str)
         default = getattr(cfg, f.name)
         parser.add_argument(f"--{f.name}", type=arg_type, default=default)
 
     args = parser.parse_args()
-    return TrainConfig(**{f.name: getattr(args, f.name) for f in dataclasses.fields(cfg) if f.name != "run_dir"})
+    return TrainConfig(**{f.name: getattr(args, f.name) for f in dataclasses.fields(cfg) if f.name not in skip})
 
 
 if __name__ == "__main__":

@@ -41,12 +41,12 @@ class TrainConfig:
     warmup_steps: int = 2_000       # ~0.5-1 % of total steps is standard
 
     # ── Batch / throughput ────────────────────────────────────────────────
-    micro_batch_size: int = 16       # per-GPU batch size (fits A40 48 GB)
+    micro_batch_size: int = 32       # per-GPU batch size
     grad_accum_steps: int = 4        # effective_batch = micro * accum * n_gpus
-    #  e.g. 16 * 4 * 8 = 512 sequences → 524 k tokens / step
+    #  e.g. 32 * 4 * 8 = 1024 sequences → 1 M tokens / step
 
     # ── Training budget ───────────────────────────────────────────────────
-    max_steps: int = 100_000         # total optimiser steps
+    num_epochs: int = 5              # number of passes over the training set
     val_interval: int = 500          # validate every N steps
     val_steps: int = 50              # micro-batches per validation
     log_interval: int = 10           # print loss every N steps
@@ -65,12 +65,17 @@ class TrainConfig:
     # ── Resume ────────────────────────────────────────────────────────────
     resume_from: str | None = None   # path to checkpoint_latest.pth (auto-detected)
 
-    # ── Derived (set in __post_init__) ────────────────────────────────────
+    # ── Derived (set in __post_init__ or at runtime) ──────────────────────
     run_dir: Path = field(init=False)
+    total_steps: int = field(init=False, default=0)  # set by train() once dataset is known
 
     def __post_init__(self) -> None:
         self.run_dir = Path(self.output_dir) / self.run_name
         self.run_dir.mkdir(parents=True, exist_ok=True)
+
+    def set_total_steps(self, steps_per_epoch: int) -> None:
+        """Call once the dataset size is known to finalise the schedule."""
+        self.total_steps = steps_per_epoch * self.num_epochs
 
     # ── LR computation ────────────────────────────────────────────────────
     def get_lr(self, step: int) -> float:
@@ -79,12 +84,12 @@ class TrainConfig:
         if step < self.warmup_steps:
             return self.learning_rate * (step + 1) / self.warmup_steps
 
-        # 2) after max_steps, hold at min_lr
-        if step >= self.max_steps:
+        # 2) after total_steps, hold at min_lr
+        if step >= self.total_steps:
             return self.min_lr
 
         # progress in [0, 1] over the decay phase
-        progress = (step - self.warmup_steps) / max(1, self.max_steps - self.warmup_steps)
+        progress = (step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
 
         if self.lr_schedule == "cosine":
             # half-cosine anneal (GPT-3, Chinchilla, LLaMA)
