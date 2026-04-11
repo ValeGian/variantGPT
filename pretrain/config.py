@@ -69,7 +69,7 @@ class TrainConfig:
     run_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
-        self.run_dir = Path(self.output_dir) / self.run_name
+        self.run_dir = Path(self.output_dir) / 'pre_training' / self.run_name
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
     # ── LR computation ────────────────────────────────────────────────────
