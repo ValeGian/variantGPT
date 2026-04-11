@@ -46,7 +46,7 @@ class TrainConfig:
     #  e.g. 48 * 3 * 8 = 1152 sequences → 1.18 M tokens / step
 
     # ── Training budget ───────────────────────────────────────────────────
-    num_epochs: int = 5              # number of passes over the training set
+    num_epochs: int = 10             # number of passes over the training set
     val_interval: int = 100          # validate every N steps
     val_steps: int = 50              # micro-batches per validation
     log_interval: int = 10           # print loss every N steps
