@@ -68,6 +68,12 @@ def setup_distributed() -> tuple[int, int, int, str]:
     Returns (rank, local_rank, world_size, device).
     """
     if "RANK" in os.environ:
+        # On single-node runs the system hostname may not resolve to a
+        # reachable address (e.g. cloud VMs with internal DNS issues).
+        # Force localhost so NCCL/TCP store can always connect.
+        if os.environ.get("MASTER_ADDR", "") in ("", os.uname().nodename):
+            os.environ["MASTER_ADDR"] = "127.0.0.1"
+
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
@@ -554,21 +560,27 @@ def parse_args() -> TrainConfig:
     Create a TrainConfig from CLI overrides.
     Any TrainConfig field can be set via --field_name value.
     """
+    import dataclasses
+
+    # Map stringified type annotations → argparse-compatible types
+    _TYPE_MAP = {
+        "int": int,
+        "float": float,
+        "str": str,
+        "bool": bool,
+        "str | None": str,
+    }
+
     cfg = TrainConfig()
     parser = argparse.ArgumentParser(description="GPT-2 Pretraining")
 
-    import dataclasses
     for f in dataclasses.fields(cfg):
         if f.name == "run_dir":
             continue  # derived field
-        ftype = f.type
-        # Handle Optional / union types for resume_from
-        if ftype == "str | None":
-            ftype = str
-        elif isinstance(ftype, str):
-            ftype = eval(ftype)
+        annotation = f.type if isinstance(f.type, str) else f.type.__name__
+        arg_type = _TYPE_MAP.get(annotation, str)  # fall back to str
         default = getattr(cfg, f.name)
-        parser.add_argument(f"--{f.name}", type=ftype, default=default)
+        parser.add_argument(f"--{f.name}", type=arg_type, default=default)
 
     args = parser.parse_args()
     return TrainConfig(**{f.name: getattr(args, f.name)
