@@ -411,6 +411,7 @@ def train(cfg: TrainConfig) -> None:
     t0 = time.perf_counter()       # interval timer for tok/s
     step = start_step
     early_stopped = False
+    prev_phase = None  # "warmup", "decay", or "hold" (for LR schedule logging)
 
     log(f"\nStarting training from epoch {start_epoch} (step {start_step}) "
         f"→ {cfg.num_epochs} epochs ({cfg.total_steps} steps)")
@@ -457,7 +458,11 @@ def train(cfg: TrainConfig) -> None:
             actual_accum = len(batches)
 
             # ── Set LR for this step ──────────────────────────────────────
-            lr = cfg.get_lr(step)
+            lr, phase = cfg.get_lr(step)
+            if prev_phase != phase:
+                log(f"  → LR phase transition: {prev_phase} → {phase}  (LR={lr:.2e})")
+                prev_phase = phase
+
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
 
