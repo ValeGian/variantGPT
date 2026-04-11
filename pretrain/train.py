@@ -314,9 +314,7 @@ def train(cfg: TrainConfig) -> None:
     log(f"Train samples: {len(train_loader.dataset):,}  "
         f"Val samples: {len(val_loader.dataset):,}")
 
-    tokens_per_step = (
-        cfg.micro_batch_size * cfg.block_size * cfg.grad_accum_steps * world_size
-    )
+    tokens_per_step = cfg.micro_batch_size * cfg.block_size * cfg.grad_accum_steps * world_size
     log(f"Tokens per optimiser step: {tokens_per_step:,}")
 
     # ── Model ─────────────────────────────────────────────────────────────
