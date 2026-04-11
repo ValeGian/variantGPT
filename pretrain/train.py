@@ -124,7 +124,7 @@ def setup_mlflow(cfg: TrainConfig, resume_run_id: str | None = None) -> str:
     import dataclasses
     params = {f.name: getattr(cfg, f.name)
               for f in dataclasses.fields(cfg)
-              if f.name not in ("run_dir", "total_steps")}
+              if f.name not in ("run_dir", "total_steps", "warmup_steps")}
     try:
         mlflow.log_params(params)
     except mlflow.exceptions.MlflowException:
@@ -414,7 +414,8 @@ def train(cfg: TrainConfig) -> None:
 
     log(f"\nStarting training from epoch {start_epoch} (step {start_step}) "
         f"→ {cfg.num_epochs} epochs ({cfg.total_steps} steps)")
-    log(f"LR schedule: {cfg.lr_schedule}  warmup={cfg.warmup_steps}  "
+    log(f"LR schedule: {cfg.lr_schedule}  "
+        f"warmup={cfg.warmup_fraction:.1%} ({cfg.warmup_steps} steps)  "
         f"peak={cfg.learning_rate}  min={cfg.min_lr}")
     log("")
 
@@ -599,6 +600,47 @@ def train(cfg: TrainConfig) -> None:
         if early_stopped:
             break
 
+        # ── End-of-epoch validation (skip if already done at this step) ───
+        if step > 0 and step % cfg.val_interval != 0:
+            val_loss = validate(model, val_loader, cfg, device, amp_ctx)
+            val_ppl = math.exp(min(val_loss, 20))
+            log(f"  [end-of-epoch {epoch+1}] val_loss = {val_loss:.4f}  "
+                f"val_ppl = {val_ppl:.1f}  "
+                f"(best = {best_val_loss:.4f}, "
+                f"patience = {patience_counter}/{cfg.patience})")
+
+            log_metrics_mlflow({
+                "val/loss": val_loss,
+                "val/perplexity": val_ppl,
+                "val/best_loss": best_val_loss,
+                "val/patience_counter": patience_counter,
+            }, step=step)
+
+            improved = val_loss < best_val_loss - cfg.min_delta
+            if improved:
+                best_val_loss = val_loss
+                patience_counter = 0
+                if master:
+                    save_best(cfg, model, step, val_loss)
+                    log_metrics_mlflow(
+                        {"val/best_loss": best_val_loss}, step=step,
+                    )
+            else:
+                patience_counter += 1
+
+            if patience_counter >= cfg.patience:
+                log(f"Early stopping triggered at end of epoch {epoch+1}.")
+                if master:
+                    save_checkpoint(
+                        cfg, model, optimizer, step, epoch,
+                        best_val_loss, patience_counter, train_loss,
+                        mlflow_run_id=mlflow_run_id,
+                    )
+                    mlflow.set_tag("stop_reason", "early_stopping")
+                    mlflow.log_metric("final/step", step)
+                early_stopped = True
+                break
+
     # ── Final save ────────────────────────────────────────────────────────
     total_elapsed = time.perf_counter() - t_start
     if master:
@@ -649,7 +691,7 @@ def parse_args() -> TrainConfig:
     cfg = TrainConfig()
     parser = argparse.ArgumentParser(description="GPT-2 Pretraining")
 
-    skip = {"run_dir", "total_steps"}  # derived fields
+    skip = {"run_dir", "total_steps", "warmup_steps"}  # derived fields
     for f in dataclasses.fields(cfg):
         if f.name in skip:
             continue
