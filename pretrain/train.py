@@ -324,7 +324,7 @@ def train(cfg: TrainConfig) -> None:
         device=device,
         flash=cfg.flash,
     )
-    model = GPT2Model(model_cfg).to(device)
+    model = GPT2Model(model_cfg)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log(f"Model parameters: {n_params:,}  ({n_params/1e6:.1f}M)")
 
