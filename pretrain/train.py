@@ -623,9 +623,7 @@ def parse_args() -> TrainConfig:
         parser.add_argument(f"--{f.name}", type=arg_type, default=default)
 
     args = parser.parse_args()
-    return TrainConfig(**{f.name: getattr(args, f.name)
-                         for f in dataclasses.fields(cfg)
-                         if f.name != "run_dir"})
+    return TrainConfig(**{f.name: getattr(args, f.name) for f in dataclasses.fields(cfg) if f.name != "run_dir"})
 
 
 if __name__ == "__main__":
