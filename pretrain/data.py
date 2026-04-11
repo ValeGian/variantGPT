@@ -44,9 +44,12 @@ class PretrainDataset(Dataset):
     def __getitem__(self, idx: int):
         start = idx * self.block_size
         end = start + self.block_size
-        # .copy() so the returned tensor owns its memory (avoids mmap issues)
-        x = torch.from_numpy(self.data[start:end].astype(np.int64).copy())
-        y = torch.from_numpy(self.data[start + 1:end + 1].astype(np.int64).copy())
+        # Store as int32 (not int64) — halves DataLoader memory and PCIe transfer.
+        # The cast to int64 (required by nn.Embedding) happens
+        # on GPU in the training loop, where it's essentially free.
+        # .astype() already copies when the dtype differs, so no extra .copy().
+        x = torch.from_numpy(self.data[start:end].astype(np.int32))
+        y = torch.from_numpy(self.data[start + 1:end + 1].astype(np.int32))
         return x, y
 
 

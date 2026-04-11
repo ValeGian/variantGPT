@@ -263,7 +263,8 @@ def validate(
     for i, (x, y) in enumerate(val_loader):
         if i >= cfg.val_steps:
             break
-        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+        x = x.to(device, non_blocking=True).long()
+        y = y.to(device, non_blocking=True).long()
         with amp_ctx:
             _, loss = model(x, y)
         losses.append(loss.item())
@@ -435,8 +436,8 @@ def train(cfg: TrainConfig) -> None:
                 train_iter = iter(train_loader)
                 x, y = next(train_iter)
 
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
+            x = x.to(device, non_blocking=True).long()
+            y = y.to(device, non_blocking=True).long()
 
             # In DDP, only sync gradients on the last micro-step
             sync_ctx = (
