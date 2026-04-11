@@ -38,16 +38,16 @@ class TrainConfig:
     #  "linear"  – warmup → linear decay to min_lr   (simpler baseline)
     #  "rsqrt"   – warmup → 1/√step decay            (PaLM-style)
     lr_schedule: Literal["cosine", "linear", "rsqrt"] = "cosine"
-    warmup_steps: int = 2_000       # ~0.5-1 % of total steps is standard
+    warmup_fraction: float = 0.01    # fraction of total_steps used for LR warmup
 
     # ── Batch / throughput ────────────────────────────────────────────────
-    micro_batch_size: int = 32       # per-GPU batch size
-    grad_accum_steps: int = 4        # effective_batch = micro * accum * n_gpus
-    #  e.g. 32 * 4 * 8 = 1024 sequences → 1 M tokens / step
+    micro_batch_size: int = 48       # per-GPU batch size
+    grad_accum_steps: int = 3        # effective_batch = micro * accum * n_gpus
+    #  e.g. 48 * 3 * 8 = 1152 sequences → 1.18 M tokens / step
 
     # ── Training budget ───────────────────────────────────────────────────
     num_epochs: int = 5              # number of passes over the training set
-    val_interval: int = 500          # validate every N steps
+    val_interval: int = 100          # validate every N steps
     val_steps: int = 50              # micro-batches per validation
     log_interval: int = 10           # print loss every N steps
 
@@ -56,7 +56,7 @@ class TrainConfig:
     keep_last_n: int = 2             # rotating checkpoint window
 
     # ── Early stopping ────────────────────────────────────────────────────
-    patience: int = 10               # N validations without improvement → stop
+    patience: int = 5                # N validations without improvement → stop
     min_delta: float = 0.001         # minimum val-loss decrease to count
 
     # ── Mixed precision ──────────────────────────────────────────────────
@@ -67,7 +67,8 @@ class TrainConfig:
 
     # ── Derived (set in __post_init__ or at runtime) ──────────────────────
     run_dir: Path = field(init=False)
-    total_steps: int = field(init=False, default=0)  # set by train() once dataset is known
+    total_steps: int = field(init=False, default=0)    # set by set_total_steps()
+    warmup_steps: int = field(init=False, default=0)   # set by set_total_steps()
 
     def __post_init__(self) -> None:
         self.run_dir = Path(self.output_dir) / self.run_name
@@ -76,6 +77,7 @@ class TrainConfig:
     def set_total_steps(self, steps_per_epoch: int) -> None:
         """Call once the dataset size is known to finalise the schedule."""
         self.total_steps = steps_per_epoch * self.num_epochs
+        self.warmup_steps = int(self.total_steps * self.warmup_fraction)
 
     # ── LR computation ────────────────────────────────────────────────────
     def get_lr(self, step: int) -> float:
