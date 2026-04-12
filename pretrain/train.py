@@ -660,8 +660,6 @@ def train(cfg: TrainConfig) -> None:
             "final/total_tokens_seen": step * tokens_per_step,
             "final/elapsed_hours": total_elapsed / 3600,
         }, step=step)
-        if not mlflow.active_run().info.tags.get("stop_reason"):
-            mlflow.set_tag("stop_reason", "completed_epochs")
 
     end_mlflow()
     cleanup_distributed()
