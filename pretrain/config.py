@@ -56,7 +56,7 @@ class TrainConfig:
     keep_last_n: int = 2             # rotating checkpoint window
 
     # ── Early stopping ────────────────────────────────────────────────────
-    patience: int = 5                # N validations without improvement → stop
+    patience: int = 7                # N validations without improvement → stop
     min_delta: float = 0.001         # minimum val-loss decrease to count
 
     # ── Mixed precision ──────────────────────────────────────────────────
