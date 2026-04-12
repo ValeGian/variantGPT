@@ -357,7 +357,6 @@ def train(cfg: TrainConfig) -> None:
         if device_type == "cuda"
         else nullcontext()
     )
-    # GradScaler is only needed for float16 (bfloat16 doesn't need it)
     scaler = (
         torch.amp.GradScaler(device_type)
         if pt_dtype == torch.float16
@@ -411,7 +410,6 @@ def train(cfg: TrainConfig) -> None:
     t0 = time.perf_counter()       # interval timer for tok/s
     step = start_step
     early_stopped = False
-    prev_phase = None  # "warmup", "decay", or "hold" (for LR schedule logging)
 
     log(f"\nStarting training from epoch {start_epoch} (step {start_step}) "
         f"→ {cfg.num_epochs} epochs ({cfg.total_steps} steps)")
@@ -458,11 +456,7 @@ def train(cfg: TrainConfig) -> None:
             actual_accum = len(batches)
 
             # ── Set LR for this step ──────────────────────────────────────
-            lr, phase = cfg.get_lr(step)
-            if prev_phase != phase:
-                log(f"  → LR phase transition: {prev_phase} → {phase}  (LR={lr:.2e})")
-                prev_phase = phase
-
+            lr = cfg.get_lr(step)
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
 
@@ -681,10 +675,13 @@ def parse_args() -> TrainConfig:
     """
     Create a TrainConfig from CLI overrides.
     Any TrainConfig field can be set via --field_name value.
+
+    Reads defaults directly from the dataclass field definitions so no
+    throwaway TrainConfig is instantiated (which would trigger
+    __post_init__ and create a spurious run directory).
     """
     import dataclasses
 
-    # Map stringified type annotations → argparse-compatible types
     _TYPE_MAP = {
         "int": int,
         "float": float,
@@ -693,20 +690,19 @@ def parse_args() -> TrainConfig:
         "str | None": str,
     }
 
-    cfg = TrainConfig()
     parser = argparse.ArgumentParser(description="GPT-2 Pretraining")
 
     skip = {"run_dir", "total_steps", "warmup_steps"}  # derived fields
-    for f in dataclasses.fields(cfg):
+    for f in dataclasses.fields(TrainConfig):
         if f.name in skip:
             continue
         annotation = f.type if isinstance(f.type, str) else f.type.__name__
         arg_type = _TYPE_MAP.get(annotation, str)
-        default = getattr(cfg, f.name)
+        default = f.default if f.default is not dataclasses.MISSING else None
         parser.add_argument(f"--{f.name}", type=arg_type, default=default)
 
     args = parser.parse_args()
-    return TrainConfig(**{f.name: getattr(args, f.name) for f in dataclasses.fields(cfg) if f.name not in skip})
+    return TrainConfig(**{f.name: getattr(args, f.name) for f in dataclasses.fields(TrainConfig) if f.name not in skip})
 
 
 if __name__ == "__main__":

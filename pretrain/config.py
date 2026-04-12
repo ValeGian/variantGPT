@@ -80,35 +80,31 @@ class TrainConfig:
         self.warmup_steps = int(self.total_steps * self.warmup_fraction)
 
     # ── LR computation ────────────────────────────────────────────────────
-    def get_lr(self, step: int) -> tuple[float, str]:
+    def get_lr(self, step: int) -> float:
         """Return the learning rate for a given optimiser step."""
         # 1) linear warmup
         if step < self.warmup_steps:
-            return self.learning_rate * (step + 1) / self.warmup_steps, "warmup"
+            return self.learning_rate * (step + 1) / self.warmup_steps
 
         # 2) after total_steps, hold at min_lr
         if step >= self.total_steps:
-            return self.min_lr, "hold"
+            return self.min_lr
 
         # progress in [0, 1] over the decay phase
         progress = (step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
 
-        lr = None
         if self.lr_schedule == "cosine":
             # half-cosine anneal (GPT-3, Chinchilla, LLaMA)
             coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
-            lr = self.min_lr + (self.learning_rate - self.min_lr) * coeff
+            return self.min_lr + (self.learning_rate - self.min_lr) * coeff
 
         elif self.lr_schedule == "linear":
-            lr = self.learning_rate - (self.learning_rate - self.min_lr) * progress
+            return self.learning_rate - (self.learning_rate - self.min_lr) * progress
 
         elif self.lr_schedule == "rsqrt":
             # 1/√t style used by PaLM; normalised so it starts at peak LR
             t = step - self.warmup_steps + 1
             decay = 1.0 / math.sqrt(t)
-            lr = max(self.min_lr, self.learning_rate * decay)
-
-        if lr is not None:
-            return lr, "decay"
+            return max(self.min_lr, self.learning_rate * decay)
 
         raise ValueError(f"Unknown lr_schedule: {self.lr_schedule}")
