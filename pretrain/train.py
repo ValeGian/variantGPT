@@ -531,7 +531,7 @@ def train(cfg: TrainConfig) -> None:
                     f"epoch {epoch+1}/{cfg.num_epochs} | "
                     f"loss {avg_loss:.4f} | "
                     f"ppl {ppl:.1f} | "
-                    f"lr {lr:.2e} | "
+                    f"lr {lr:.6e} | "
                     f"grad_norm {grad_norm:.2f} | "
                     f"{tok_per_sec:,.0f} tok/s | "
                     f"elapsed {fmt_duration(elapsed)} | "
