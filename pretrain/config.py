@@ -41,9 +41,9 @@ class TrainConfig:
     warmup_fraction: float = 0.05    # fraction of total_steps used for LR warmup
 
     # ── Batch / throughput ────────────────────────────────────────────────
-    micro_batch_size: int = 48       # per-GPU batch size
+    micro_batch_size: int = 52       # per-GPU batch size
     grad_accum_steps: int = 3        # effective_batch = micro * accum * n_gpus
-    #  e.g. 48 * 3 * 8 = 1152 sequences → 1.18 M tokens / step
+    #  e.g. 52 * 3 * 8 = 1248 sequences → 1.28 M tokens / step
 
     # ── Training budget ───────────────────────────────────────────────────
     num_epochs: int = 10             # number of passes over the training set
