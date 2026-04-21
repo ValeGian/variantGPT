@@ -18,6 +18,6 @@ torchrun \
   --master_port=29500 \
   --local-addr=10.40.1.8 \
   train.py \
-  --run_name "EAGLE3-local-small_mqa" \
+  --run_name "mqa" \
   --attention_type "mqa" \
   --n_kv_head 1
