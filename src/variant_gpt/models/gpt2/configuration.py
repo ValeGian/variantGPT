@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -14,3 +15,6 @@ class GPT2Config:
     bias: bool = False  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     flash: bool = False  # use flash attention
     device: str = "cuda"  # device to run on
+
+    attention_type: str = "mha"
+    n_kv_head: Optional[int] = None  # only read by GQA-family variants

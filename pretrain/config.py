@@ -25,6 +25,9 @@ class TrainConfig:
     flash: bool = True
     block_size: int = 1024      # context / sequence length
 
+    attention_type: str = "mha"
+    n_kv_head: int | None = None  # only read by GQA-family variants; None => MHA, 1 => MQA, 1<k<n_head => GQA
+
     # ── Optimiser ─────────────────────────────────────────────────────────
     learning_rate: float = 6e-4          # peak LR  (GPT-2 124M sweet spot)
     min_lr: float = 6e-5                 # 10% of peak is a common floor

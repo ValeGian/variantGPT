@@ -8,75 +8,7 @@ from torch.nn import functional as F
 
 from .configuration import GPT2Config
 from ...activations import ACT2FN
-
-
-class GPT2Attention(nn.Module):
-    def __init__(self, config: GPT2Config, flash=True):
-        super().__init__()
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.dropout = config.dropout
-
-        assert self.n_embd % self.n_head == 0
-        self.head_dim = self.n_embd // self.n_head
-
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=config.bias)
-        # output projection
-        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=config.bias)
-        # regularization
-        self.resid_dropout = nn.Dropout(config.dropout)
-
-        self.flash = flash
-        if not self.flash:
-            self.attn_dropout = nn.Dropout(config.dropout)
-            # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer(
-                "bias",
-                torch.tril(torch.ones(config.block_size, config.block_size))
-                .view(1, 1, config.block_size, config.block_size)
-            )
-
-    def forward(self, x):
-        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
-
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, T, hs)
-
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
-            y = F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=None,
-                dropout_p=self.dropout if self.training else 0,
-                is_causal=True
-            )
-        else:
-            scale = 1.0 / math.sqrt(self.head_dim)
-
-            # manual implementation of attention
-            # att = (q @ k.transpose(-2, -1)) * scale
-
-            # torch.baddbmm fuses the scaled matmul into a single BLAS call instead of a separate multiply + scale
-            att = torch.baddbmm(
-                torch.zeros(B * self.n_head, T, T, device=x.device, dtype=x.dtype),
-                q.reshape(B * self.n_head, T, self.head_dim),
-                k.reshape(B * self.n_head, self.head_dim, T),
-                alpha=scale,
-            ).view(B, self.n_head, T, T)
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
-
-        # output projection
-        y = self.resid_dropout(self.c_proj(y))
-        return y
+from ...attention import AttentionConfig, build_attention
 
 
 class GPT2MLP(nn.Module):
@@ -97,11 +29,22 @@ class GPT2Block(nn.Module):
     def __init__(self, config: GPT2Config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd, bias=config.bias, eps=config.layer_norm_epsilon)
-        self.attn = GPT2Attention(config, flash=config.flash)
+
+        attn_cfg = AttentionConfig(
+            n_embd=config.n_embd,
+            n_head=config.n_head,
+            block_size=config.block_size,
+            dropout=config.dropout,
+            bias=config.bias,
+            flash=config.flash,
+            n_kv_head=config.n_kv_head
+        )
+        self.attn = build_attention(config.attention_type, attn_cfg)
+
         self.ln_2 = nn.LayerNorm(config.n_embd, bias=config.bias, eps=config.layer_norm_epsilon)
         self.mlp = GPT2MLP(config)
 
-    def forward(self, x: Optional[tuple[torch.FloatTensor]]) -> torch.FloatTensor:
+    def forward(self, x):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
