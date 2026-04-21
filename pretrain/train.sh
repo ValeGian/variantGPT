@@ -19,3 +19,5 @@ torchrun \
   --local-addr=10.40.1.8 \
   train.py \
   --run_name "EAGLE3-local-small_mqa" \
+  --attention_type "mqa" \
+  --n_kv_head 1
