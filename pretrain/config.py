@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 
 @dataclass
@@ -26,7 +26,8 @@ class TrainConfig:
     block_size: int = 1024      # context / sequence length
 
     attention_type: str = "mha"
-    n_kv_head: int | None = None  # only read by GQA-family variants; None => MHA, 1 => MQA, 1<k<n_head => GQA
+    n_kv_head: Optional[int] = None  # only read by GQA-family variants; None => MHA, 1 => MQA, 1<k<n_head => GQA
+    window_size: Optional[int] = None  # Used by local (sliding-window) attention. None => full attention.
 
     # ── Optimiser ─────────────────────────────────────────────────────────
     learning_rate: float = 6e-4          # peak LR  (GPT-2 124M sweet spot)
