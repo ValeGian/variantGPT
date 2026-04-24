@@ -12,3 +12,4 @@ class AttentionConfig:
     flash: bool = True
 
     n_kv_head: Optional[int] = None  # Used by GQA-family variants. None => MHA, 1 => MQA, 1<k<n_head => GQA.
+    window_size: Optional[int] = None  # Used by local (sliding-window) attention. None => full attention.

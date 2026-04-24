@@ -37,7 +37,9 @@ class GPT2Block(nn.Module):
             dropout=config.dropout,
             bias=config.bias,
             flash=config.flash,
-            n_kv_head=config.n_kv_head
+            n_kv_head=getattr(config, "n_kv_head", None),
+            # Optional on GPT2Config; only required when attention_type == "local".
+            window_size=getattr(config, "window_size", None),
         )
         self.attn = build_attention(config.attention_type, attn_cfg)
 

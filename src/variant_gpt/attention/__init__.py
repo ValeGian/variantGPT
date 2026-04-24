@@ -4,10 +4,12 @@ from .base import CausalSelfAttention
 from .config import AttentionConfig
 from .mha import MultiHeadAttention
 from .mqa import MultiQueryAttention
+from .local import LocalAttention
 
 _REGISTRY: dict[str, Type[CausalSelfAttention]] = {
     "mha": MultiHeadAttention,
     "mqa": MultiQueryAttention,
+    "local": LocalAttention,
 }
 
 
@@ -38,6 +40,7 @@ __all__ = [
     "CausalSelfAttention",
     "MultiHeadAttention",
     "MultiQueryAttention",
+    "LocalAttention",
     "build_attention",
     "register_attention",
     "available_attentions",
