@@ -51,7 +51,7 @@ class TrainConfig:
     #  e.g. 52 * 3 * 8 = 1248 sequences → 1.28 M tokens / step
 
     # ── Training budget ───────────────────────────────────────────────────
-    num_epochs: int = 10             # number of passes over the training set
+    num_epochs: int = 5              # number of passes over the training set
     val_interval: int = 100          # validate every N steps
     val_steps: int = 50              # micro-batches per validation
     log_interval: int = 10           # print loss every N steps
@@ -61,7 +61,7 @@ class TrainConfig:
     keep_last_n: int = 2             # rotating checkpoint window
 
     # ── Early stopping ────────────────────────────────────────────────────
-    patience: int = 7                # N validations without improvement → stop
+    patience: int = 5                # N validations without improvement → stop
     min_delta: float = 0.001         # minimum val-loss decrease to count
 
     # ── Mixed precision ──────────────────────────────────────────────────
