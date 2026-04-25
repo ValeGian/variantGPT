@@ -325,9 +325,14 @@ def train(cfg: TrainConfig) -> None:
     # ── Model ─────────────────────────────────────────────────────────────
     model_cfg = GPT2Config(
         vocab_size=vocab_size,
-        dropout=cfg.dropout,
         device=device,
+        dropout=cfg.dropout,
         flash=cfg.flash,
+        block_size=cfg.block_size,
+        attention_type=cfg.attention_type,
+        n_kv_head=cfg.n_kv_head,
+        window_size=cfg.window_size,
+        chunk_size=cfg.chunk_size,
     )
     model = GPT2Model(model_cfg)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

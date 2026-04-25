@@ -28,7 +28,7 @@ class TrainConfig:
     attention_type: str = "mha"
     n_kv_head: Optional[int] = None    # only read by GQA-family variants; None => MHA, 1 => MQA, 1<k<n_head => GQA
     window_size: Optional[int] = None  # Used by local (sliding-window) attention. None => full attention.
-    chunk_size: int = 64               # Used by linear attention for the chunked parallel algorithm.
+    chunk_size: Optional[int] = None   # Used by linear attention for the chunked parallel algorithm.
 
     # ── Optimiser ─────────────────────────────────────────────────────────
     learning_rate: float = 6e-4          # peak LR  (GPT-2 124M sweet spot)

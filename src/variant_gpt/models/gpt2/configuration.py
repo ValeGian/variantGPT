@@ -18,3 +18,5 @@ class GPT2Config:
 
     attention_type: str = "mha"
     n_kv_head: Optional[int] = None  # only read by GQA-family variants
+    window_size: Optional[int] = None  # only read by local (sliding-window) variant
+    chunk_size: Optional[int] = None  # only by linear variant

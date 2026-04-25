@@ -38,11 +38,11 @@ class GPT2Block(nn.Module):
             bias=config.bias,
             flash=config.flash,
             # Optional on GPT2Config; only used when attention_type == "mqa".
-            n_kv_head=getattr(config, "n_kv_head", None),
+            n_kv_head=config.n_kv_head,
             # Optional on GPT2Config; only required when attention_type == "local".
-            window_size=getattr(config, "window_size", None),
+            window_size=config.window_size,
             # Optional on GPT2Config; only used when attention_type == "linear".
-            chunk_size=getattr(config, "chunk_size", 64),
+            chunk_size=config.chunk_size
         )
         self.attn = build_attention(config.attention_type, attn_cfg)
 
