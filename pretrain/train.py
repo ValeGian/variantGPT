@@ -19,10 +19,12 @@ Override any config field from the CLI:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import math
 import os
 import sys
 import time
+import typing
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -675,37 +677,45 @@ def train(cfg: TrainConfig) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def parse_args() -> TrainConfig:
-    """
-    Create a TrainConfig from CLI overrides.
-    Any TrainConfig field can be set via --field_name value.
-
-    Reads defaults directly from the dataclass field definitions so no
-    throwaway TrainConfig is instantiated (which would trigger
-    __post_init__ and create a spurious run directory).
-    """
-    import dataclasses
-
     _TYPE_MAP = {
-        "int": int,
-        "float": float,
-        "str": str,
-        "bool": bool,
-        "str | None": str,
+        int: int,
+        float: float,
+        str: str,
+        bool: bool,
     }
+
+    def resolve_type(hint) -> tuple[type, bool]:
+        """Return (base_type, is_optional) for a type hint."""
+        origin = typing.get_origin(hint)
+        args = typing.get_args(hint)
+        # Optional[X] is Union[X, None]
+        if origin is typing.Union and type(None) in args:
+            inner = next(a for a in args if a is not type(None))
+            return _TYPE_MAP.get(inner, str), True
+        return _TYPE_MAP.get(hint, str), False
 
     parser = argparse.ArgumentParser(description="GPT-2 Pretraining")
 
-    skip = {"run_dir", "total_steps", "warmup_steps"}  # derived fields
+    skip = {"run_dir", "total_steps", "warmup_steps"}
+    hints = typing.get_type_hints(TrainConfig)
+
     for f in dataclasses.fields(TrainConfig):
         if f.name in skip:
             continue
-        annotation = f.type if isinstance(f.type, str) else f.type.__name__
-        arg_type = _TYPE_MAP.get(annotation, str)
+        hint = hints.get(f.name, str)
+        arg_type, is_optional = resolve_type(hint)
         default = f.default if f.default is not dataclasses.MISSING else None
-        parser.add_argument(f"--{f.name}", type=arg_type, default=default)
+        kwargs = dict(type=arg_type, default=default)
+        if is_optional:
+            kwargs["required"] = False  # already implied, but makes intent clear
+        parser.add_argument(f"--{f.name}", **kwargs)
 
     args = parser.parse_args()
-    return TrainConfig(**{f.name: getattr(args, f.name) for f in dataclasses.fields(TrainConfig) if f.name not in skip})
+    return TrainConfig(**{
+        f.name: getattr(args, f.name)
+        for f in dataclasses.fields(TrainConfig)
+        if f.name not in skip
+    })
 
 
 if __name__ == "__main__":
