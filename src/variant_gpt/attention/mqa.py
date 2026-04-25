@@ -1,62 +1,22 @@
-import math
-import torch
-from torch import nn
-from torch.nn import functional as F
+from dataclasses import replace
 
-from .base import CausalSelfAttention
 from .config import AttentionConfig
+from .gqa import GroupedQueryAttention
 
 
-class MultiQueryAttention(CausalSelfAttention):
+class MultiQueryAttention(GroupedQueryAttention):
+    """
+    Multi-query attention.
+
+    Special case of grouped-query attention where all query heads share a
+    single key/value head (n_kv_head = 1). Whatever the user sets for
+    `n_kv_head` in the config is overridden here so that `attention_type="mqa"`
+    is always unambiguously MQA.
+
+    The underlying `GroupedQueryAttention` uses separate `q_attn` and `kv_attn`
+    projections in this regime, matching the parameter layout of the original
+    standalone MQA implementation.
+    """
+
     def __init__(self, config: AttentionConfig):
-        super().__init__(config)
-        assert config.n_embd % config.n_head == 0
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.dropout = config.dropout
-        self.head_dim = config.n_embd // config.n_head
-        self.flash = config.flash
-
-        self.q_attn = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.kv_attn = nn.Linear(config.n_embd, 2 * self.head_dim, bias=config.bias)
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.resid_dropout = nn.Dropout(config.dropout)
-
-        if not self.flash:
-            self.attn_dropout = nn.Dropout(config.dropout)
-            self.register_buffer(
-                "causal_mask",
-                torch.tril(torch.ones(config.block_size, config.block_size))
-                .view(1, 1, config.block_size, config.block_size),
-            )
-
-    def forward(self, x):
-        B, T, C = x.size()
-
-        q = self.q_attn(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-
-        k, v = self.kv_attn(x).split(self.head_dim, dim=2)
-        k = k.view(B, T, 1, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, 1, self.head_dim).transpose(1, 2)
-
-        # Broadcast K/V over query heads without materializing copies.
-        k = k.expand(B, self.n_head, T, self.head_dim)
-        v = v.expand(B, self.n_head, T, self.head_dim)
-
-        if self.flash:
-            y = F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=None,
-                dropout_p=self.dropout if self.training else 0,
-                is_causal=True,
-            )
-        else:
-            scale = 1.0 / math.sqrt(self.head_dim)
-            att = (q @ k.transpose(-2, -1)) * scale
-            att = att.masked_fill(self.causal_mask[:, :, :T, :T] == 0, float("-inf"))
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v
-
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.resid_dropout(self.c_proj(y))
+        super().__init__(replace(config, n_kv_head=1))

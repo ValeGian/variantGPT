@@ -2,14 +2,16 @@ from typing import Type
 
 from .base import CausalSelfAttention
 from .config import AttentionConfig
+from .gqa import GroupedQueryAttention
 from .mha import MultiHeadAttention
 from .mqa import MultiQueryAttention
 from .local import LocalAttention
 from .linear import LinearAttention
 
 _REGISTRY: dict[str, Type[CausalSelfAttention]] = {
-    "mha": MultiHeadAttention,
-    "mqa": MultiQueryAttention,
+    "mha": MultiHeadAttention,      # GQA with n_kv_head = n_head
+    "mqa": MultiQueryAttention,     # GQA with n_kv_head = 1
+    "gqa": GroupedQueryAttention,   # n_kv_head taken from config (1 ≤ k ≤ n_head)
     "local": LocalAttention,
     "linear": LinearAttention,
 }
@@ -40,6 +42,7 @@ def available_attentions() -> list[str]:
 __all__ = [
     "AttentionConfig",
     "CausalSelfAttention",
+    "GroupedQueryAttention",
     "MultiHeadAttention",
     "MultiQueryAttention",
     "LocalAttention",
