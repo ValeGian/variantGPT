@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Example usage:
+# bash ./train.sh --run_name mha --attention_type mha
+
 export NCCL_SOCKET_IFNAME=bond0
 export GLOO_SOCKET_IFNAME=bond0
 export MASTER_ADDR=10.40.1.8
