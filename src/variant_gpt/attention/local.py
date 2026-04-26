@@ -3,13 +3,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-try:
-    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
-    _flex_attention = torch.compile(flex_attention)
-    _FLEX_OK = True
-except ImportError:
-    _FLEX_OK = False
-
 from .base import CausalSelfAttention
 from .config import AttentionConfig
 
@@ -63,23 +56,6 @@ class LocalAttention(CausalSelfAttention):
             persistent=False,
         )
 
-        self.use_flex = self.flash and _FLEX_OK
-        self._block_mask_cache: dict[int, object] = {}
-
-    def _get_block_mask(self, T: int, device):
-        bm = self._block_mask_cache.get(T)
-        if bm is None:
-            W = self.window_size
-
-            def mask_mod(b, h, q_idx, kv_idx):
-                return (q_idx >= kv_idx) & (q_idx - kv_idx < W)
-
-            bm = create_block_mask(
-                mask_mod, B=None, H=None, Q_LEN=T, KV_LEN=T, device=device,
-            )
-            self._block_mask_cache[T] = bm
-        return bm
-
     def forward(self, x):
         B, T, C = x.size()
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
@@ -87,12 +63,8 @@ class LocalAttention(CausalSelfAttention):
         k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
 
-        if self.use_flex:
-            print("Using Flex Attention")
-            block_mask = self._get_block_mask(T, x.device)
-            y = _flex_attention(q, k, v, block_mask=block_mask)
-        elif self.flash:
-            mask = self.window_mask[:, :, :T, :T]
+        mask = self.window_mask[:, :, :T, :T]
+        if self.flash:
             # Boolean attn_mask already encodes causality, so is_causal=False.
             # (SDPA disallows combining is_causal=True with an explicit mask.)
             y = F.scaled_dot_product_attention(
@@ -102,7 +74,6 @@ class LocalAttention(CausalSelfAttention):
                 is_causal=False,
             )
         else:
-            mask = self.window_mask[:, :, :T, :T]
             scale = 1.0 / math.sqrt(self.head_dim)
             att = (q @ k.transpose(-2, -1)) * scale
             att = att.masked_fill(~mask, float("-inf"))
