@@ -7,13 +7,15 @@ from .mha import MultiHeadAttention
 from .mqa import MultiQueryAttention
 from .local import LocalAttention
 from .linear import LinearAttention
+from .sparse import SparseAttention
 
 _REGISTRY: dict[str, Type[CausalSelfAttention]] = {
     "mha": MultiHeadAttention,      # GQA with n_kv_head = n_head
     "mqa": MultiQueryAttention,     # GQA with n_kv_head = 1
     "gqa": GroupedQueryAttention,   # n_kv_head taken from config (1 ≤ k ≤ n_head)
-    "local": LocalAttention,
-    "linear": LinearAttention,
+    "local": LocalAttention,        # sliding-window causal attention
+    "linear": LinearAttention,      # kernel-feature-map attention, O(T) compute
+    "sparse": SparseAttention,      # BigBird-style: global + window + random
 }
 
 
@@ -47,6 +49,7 @@ __all__ = [
     "MultiQueryAttention",
     "LocalAttention",
     "LinearAttention",
+    "SparseAttention",
     "build_attention",
     "register_attention",
     "available_attentions",
