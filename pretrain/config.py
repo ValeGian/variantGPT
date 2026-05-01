@@ -26,9 +26,11 @@ class TrainConfig:
     block_size: int = 1024      # context / sequence length
 
     attention_type: str = "mha"
-    n_kv_head: Optional[int] = None    # only read by GQA-family variants; None => MHA, 1 => MQA, 1<k<n_head => GQA
-    window_size: Optional[int] = None  # Used by local (sliding-window) attention. None => full attention.
-    chunk_size: Optional[int] = None   # Used by linear attention for the chunked parallel algorithm.
+    n_kv_head: Optional[int] = None        # only read by GQA-family variants; None => MHA, 1 => MQA, 1<k<n_head => GQA
+    window_size: Optional[int] = None      # Used by "local" and "sparse" variants. None => full attention.
+    chunk_size: Optional[int] = None       # Used by "linear" variant for the chunked parallel algorithm.
+    n_global_tokens: Optional[int] = None  # Used by "sparse" (BigBird) variant — number of leading global tokens.
+    n_random_tokens: Optional[int] = None  # Used by "sparse" (BigBird) variant — random connections per query.
 
     # ── Optimiser ─────────────────────────────────────────────────────────
     learning_rate: float = 6e-4          # peak LR  (GPT-2 124M sweet spot)
