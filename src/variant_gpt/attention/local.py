@@ -44,8 +44,10 @@ class LocalAttention(CausalSelfAttention):
             self.attn_dropout = nn.Dropout(config.dropout)
 
         # Precompute the sliding-window causal mask once.
-        # mask[i, j] = True  -> allowed to attend
-        # mask[i, j] = False -> masked out
+        # Broadcasting i (column vector) against j (row vector) gives a (T, T)
+        # grid where mask[i, j] tells us whether query i may attend to key j.
+        #   mask[i, j] = True  -> allowed to attend
+        #   mask[i, j] = False -> masked out
         T = config.block_size
         i = torch.arange(T).view(T, 1)
         j = torch.arange(T).view(1, T)
@@ -58,12 +60,12 @@ class LocalAttention(CausalSelfAttention):
 
     def forward(self, x):
         B, T, C = x.size()
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)              # each (B, T, n_embd)
+        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)    # (B, n_head, T, D)
+        k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)    # (B, n_head, T, D)
+        v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)    # (B, n_head, T, D)
 
-        mask = self.window_mask[:, :, :T, :T]
+        mask = self.window_mask[:, :, :T, :T]                            # (1, 1, T, T)
         if self.flash:
             # Boolean attn_mask already encodes causality, so is_causal=False.
             # (SDPA disallows combining is_causal=True with an explicit mask.)
@@ -81,5 +83,6 @@ class LocalAttention(CausalSelfAttention):
             att = self.attn_dropout(att)
             y = att @ v
 
+        # Re-merge heads: (B, n_head, T, D) → (B, T, n_embd).
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_dropout(self.c_proj(y))

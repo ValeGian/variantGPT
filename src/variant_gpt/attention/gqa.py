@@ -69,11 +69,14 @@ class GroupedQueryAttention(CausalSelfAttention):
     def forward(self, x):
         B, T, C = x.size()
 
+        # Project to Q, K, V. With GQA the K/V dim is smaller than Q's:
+        #   Q has n_head    × head_dim channels  = n_embd
+        #   K, V have n_kv_head × head_dim channels = kv_dim
         if self.is_mha:
             q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
         else:
-            q = self.q_attn(x)
-            k, v = self.kv_attn(x).split(self.kv_dim, dim=2)
+            q = self.q_attn(x)                                  # (B, T, n_embd)
+            k, v = self.kv_attn(x).split(self.kv_dim, dim=2)    # each (B, T, kv_dim)
 
         q = q.view(B, T, self.n_head,    self.head_dim).transpose(1, 2)  # (B, n_head,    T, D)
         k = k.view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)  # (B, n_kv_head, T, D)
@@ -90,17 +93,20 @@ class GroupedQueryAttention(CausalSelfAttention):
                 enable_gqa=not self.is_mha,
             )
         else:
-            # Manual path: broadcast K/V over query groups via repeat_interleave.
+            # Manual path: SDPA's broadcasting trick isn't available, so we
+            # explicitly tile each KV head ``group_size`` times along the head
+            # axis to match Q. This is correct but allocates a full-size K/V.
             if not self.is_mha:
                 group_size = self.n_head // self.n_kv_head
-                k = k.repeat_interleave(group_size, dim=1)
-                v = v.repeat_interleave(group_size, dim=1)
+                k = k.repeat_interleave(group_size, dim=1)  # (B, n_head, T, D)
+                v = v.repeat_interleave(group_size, dim=1)  # (B, n_head, T, D)
             scale = 1.0 / math.sqrt(self.head_dim)
-            att = (q @ k.transpose(-2, -1)) * scale
+            att = (q @ k.transpose(-2, -1)) * scale         # (B, n_head, T, T)
             att = att.masked_fill(self.causal_mask[:, :, :T, :T] == 0, float("-inf"))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
-            y = att @ v
+            y = att @ v                                     # (B, n_head, T, D)
 
+        # Re-merge heads: (B, n_head, T, D) → (B, T, n_embd).
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_dropout(self.c_proj(y))
