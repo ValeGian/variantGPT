@@ -37,12 +37,15 @@ class GPT2Block(nn.Module):
             dropout=config.dropout,
             bias=config.bias,
             flash=config.flash,
-            # Optional on GPT2Config; only used when attention_type == "mqa".
+            # Optional on GPT2Config; used by GQA-family variants ("gqa", "mqa").
             n_kv_head=config.n_kv_head,
-            # Optional on GPT2Config; only required when attention_type == "local".
+            # Optional on GPT2Config; used by "local" and "sparse" variants.
             window_size=config.window_size,
-            # Optional on GPT2Config; only used when attention_type == "linear".
-            chunk_size=config.chunk_size
+            # Optional on GPT2Config; used by "linear" variant.
+            chunk_size=config.chunk_size,
+            # Optional on GPT2Config; used by "sparse" (BigBird) variant.
+            n_global_tokens=config.n_global_tokens,
+            n_random_tokens=config.n_random_tokens,
         )
         self.attn = build_attention(config.attention_type, attn_cfg)
 
