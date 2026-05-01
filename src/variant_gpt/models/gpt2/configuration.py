@@ -17,6 +17,8 @@ class GPT2Config:
     device: str = "cuda"  # device to run on
 
     attention_type: str = "mha"
-    n_kv_head: Optional[int] = None  # only read by GQA-family variants
-    window_size: Optional[int] = None  # only read by local (sliding-window) variant
-    chunk_size: Optional[int] = None  # only by linear variant
+    n_kv_head: Optional[int] = None        # only used by GQA-family variants ("gqa", "mqa")
+    window_size: Optional[int] = None      # only used by "local" and "sparse" variants
+    chunk_size: Optional[int] = None       # only used by "linear" variant
+    n_global_tokens: Optional[int] = None  # only used by "sparse" (BigBird) variant
+    n_random_tokens: Optional[int] = None  # only used by "sparse" (BigBird) variant
