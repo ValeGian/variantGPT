@@ -8,14 +8,16 @@ from .mqa import MultiQueryAttention
 from .local import LocalAttention
 from .linear import LinearAttention
 from .sparse import SparseAttention
+from .mla import MultiHeadLatentAttention
 
 _REGISTRY: dict[str, Type[CausalSelfAttention]] = {
-    "mha": MultiHeadAttention,      # GQA with n_kv_head = n_head
-    "mqa": MultiQueryAttention,     # GQA with n_kv_head = 1
-    "gqa": GroupedQueryAttention,   # n_kv_head taken from config (1 ≤ k ≤ n_head)
-    "local": LocalAttention,        # sliding-window causal attention
-    "linear": LinearAttention,      # kernel-feature-map attention, O(T) compute
-    "sparse": SparseAttention,      # BigBird-style: global + window + random
+    "mha": MultiHeadAttention,        # GQA with n_kv_head = n_head
+    "mqa": MultiQueryAttention,       # GQA with n_kv_head = 1
+    "gqa": GroupedQueryAttention,     # n_kv_head taken from config (1 ≤ k ≤ n_head)
+    "local": LocalAttention,          # sliding-window causal attention
+    "linear": LinearAttention,        # kernel-feature-map attention, O(T) compute
+    "sparse": SparseAttention,        # BigBird-style: global + window + random
+    "mla": MultiHeadLatentAttention,  # DeepSeek-V2 low-rank KV + decoupled RoPE
 }
 
 
@@ -50,6 +52,7 @@ __all__ = [
     "LocalAttention",
     "LinearAttention",
     "SparseAttention",
+    "MultiHeadLatentAttention",
     "build_attention",
     "register_attention",
     "available_attentions",

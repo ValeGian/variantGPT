@@ -337,6 +337,12 @@ def train(cfg: TrainConfig) -> None:
         chunk_size=cfg.chunk_size,
         n_global_tokens=cfg.n_global_tokens,
         n_random_tokens=cfg.n_random_tokens,
+        q_lora_rank=cfg.q_lora_rank,
+        kv_lora_rank=cfg.kv_lora_rank,
+        qk_nope_head_dim=cfg.qk_nope_head_dim,
+        qk_rope_head_dim=cfg.qk_rope_head_dim,
+        v_head_dim=cfg.v_head_dim,
+        rope_base=cfg.rope_base,
     )
     model = GPT2Model(model_cfg)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

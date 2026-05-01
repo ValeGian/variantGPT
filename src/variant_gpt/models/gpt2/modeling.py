@@ -46,6 +46,13 @@ class GPT2Block(nn.Module):
             # Optional on GPT2Config; used by "sparse" (BigBird) variant.
             n_global_tokens=config.n_global_tokens,
             n_random_tokens=config.n_random_tokens,
+            # Optional on GPT2Config; used by "mla" variant.
+            q_lora_rank=config.q_lora_rank,
+            kv_lora_rank=config.kv_lora_rank,
+            qk_nope_head_dim=config.qk_nope_head_dim,
+            qk_rope_head_dim=config.qk_rope_head_dim,
+            v_head_dim=config.v_head_dim,
+            rope_base=config.rope_base,
         )
         self.attn = build_attention(config.attention_type, attn_cfg)
 

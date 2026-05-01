@@ -32,6 +32,21 @@ class TrainConfig:
     n_global_tokens: Optional[int] = None  # Used by "sparse" (BigBird) variant — number of leading global tokens.
     n_random_tokens: Optional[int] = None  # Used by "sparse" (BigBird) variant — random connections per query.
 
+    # ── MLA (DeepSeek-V2) ─────────────────────────────────────────────────
+    # Only read by attention_type="mla". A reasonable starting point for the
+    # GPT-2 124M scale (n_embd=768, n_head=12, head_dim=64) is:
+    #   q_lora_rank=None or 384,    # None => full-rank Q
+    #   kv_lora_rank=192,           # ~ 3 * head_dim, big KV-cache savings
+    #   qk_nope_head_dim=64,        # = head_dim
+    #   qk_rope_head_dim=32,        # half of head_dim, must be even
+    #   v_head_dim=64,              # = head_dim
+    q_lora_rank: Optional[int] = None
+    kv_lora_rank: Optional[int] = None
+    qk_nope_head_dim: Optional[int] = None
+    qk_rope_head_dim: Optional[int] = None
+    v_head_dim: Optional[int] = None
+    rope_base: Optional[float] = None
+
     # ── Optimiser ─────────────────────────────────────────────────────────
     learning_rate: float = 6e-4          # peak LR  (GPT-2 124M sweet spot)
     min_lr: float = 6e-5                 # 10% of peak is a common floor

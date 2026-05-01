@@ -22,3 +22,14 @@ class GPT2Config:
     chunk_size: Optional[int] = None       # only used by "linear" variant
     n_global_tokens: Optional[int] = None  # only used by "sparse" (BigBird) variant
     n_random_tokens: Optional[int] = None  # only used by "sparse" (BigBird) variant
+
+    # ── MLA (DeepSeek-V2) ─────────────────────────────────────────────────
+    # Only used by attention_type="mla". Defaults are deliberately None so an
+    # accidentally-built MLA without explicit dims fails fast with a clear
+    # message instead of silently picking arbitrary numbers.
+    q_lora_rank: Optional[int] = None
+    kv_lora_rank: Optional[int] = None
+    qk_nope_head_dim: Optional[int] = None
+    qk_rope_head_dim: Optional[int] = None
+    v_head_dim: Optional[int] = None
+    rope_base: Optional[float] = None
